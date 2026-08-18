@@ -45,7 +45,10 @@ void app_main(void)
     tuss4470_status_t status;
     while(1) {
         vTaskDelay(pdMS_TO_TICKS(1000));
-        tuss4470_get_status(&status);
+        esp_err_t err = tuss4470_get_status(&status);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to get TUSS4470 status: %s", esp_err_to_name(err));
+        }
         tuss4470_log_status(&status);
     }
 
