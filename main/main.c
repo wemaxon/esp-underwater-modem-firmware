@@ -41,7 +41,7 @@ void app_main(void)
     ESP_ERROR_CHECK(tuss4470_init(&config));
 
     while(1) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
+        vTaskDelay(pdMS_TO_TICKS(3000));
     }
 
 }

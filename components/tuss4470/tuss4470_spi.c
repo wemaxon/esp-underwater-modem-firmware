@@ -8,6 +8,9 @@
 
 static const char *TAG = "TUSS4470_SPI";
 
+_Static_assert(sizeof(tuss4470_spi_response_t) == sizeof(uint16_t),
+               "Unexpected TUSS4470 SPI response size");
+
 
 uint16_t tuss4470_spi_set_parity(uint16_t frame)
 {
@@ -29,8 +32,9 @@ uint16_t tuss4470_spi_set_parity(uint16_t frame)
     return value;
 }
 
-esp_err_t tuss4470_spi_write_register(spi_device_handle_t spi, uint8_t address, uint8_t data){
+esp_err_t tuss4470_spi_write_register(spi_device_handle_t spi, uint8_t address, uint8_t data, tuss4470_spi_response_t *response){
     ESP_RETURN_ON_FALSE(spi != NULL, ESP_ERR_INVALID_ARG, TAG, "spi is NULL");
+    ESP_RETURN_ON_FALSE(response != NULL, ESP_ERR_INVALID_ARG, TAG, "response is NULL");
 
     uint16_t frame = 0U;
     frame |= (uint16_t)(address & 0x3FU) << 9U;
@@ -38,16 +42,23 @@ esp_err_t tuss4470_spi_write_register(spi_device_handle_t spi, uint8_t address, 
     frame = tuss4470_spi_set_parity(frame);
 
     spi_transaction_t t = {
-        .flags = SPI_TRANS_USE_TXDATA,
+        .flags = SPI_TRANS_USE_TXDATA | SPI_TRANS_USE_RXDATA,
         .tx_data = { (uint8_t)(frame >> 8U), (uint8_t)(frame & 0xFFU) },
         .length = 16,
+        .rxlength = 16,
     };
-    return spi_device_transmit(spi, &t);
+
+    ESP_RETURN_ON_ERROR(spi_device_transmit(spi, &t), TAG, "Failed to transmit SPI transaction");
+
+    response->raw = ((uint16_t)t.rx_data[0] << 8U) | t.rx_data[1];
+    ESP_RETURN_ON_FALSE(tuss4470_spi_set_parity(response->raw) == response->raw,
+                        ESP_ERR_INVALID_CRC, TAG, "Invalid response parity");
+    return ESP_OK;
 }
 
-esp_err_t tuss4470_spi_read_register(spi_device_handle_t spi, uint8_t address, uint8_t *data){
+esp_err_t tuss4470_spi_read_register(spi_device_handle_t spi, uint8_t address, tuss4470_spi_response_t *response){
     ESP_RETURN_ON_FALSE(spi != NULL, ESP_ERR_INVALID_ARG, TAG, "spi is NULL");
-    ESP_RETURN_ON_FALSE(data != NULL, ESP_ERR_INVALID_ARG, TAG, "data is NULL");
+    ESP_RETURN_ON_FALSE(response != NULL, ESP_ERR_INVALID_ARG, TAG, "response is NULL");
 
     uint16_t frame = 0U;
     frame |= TUSS4470_READ_BIT;
@@ -67,6 +78,8 @@ esp_err_t tuss4470_spi_read_register(spi_device_handle_t spi, uint8_t address, u
 
     ESP_RETURN_ON_ERROR(spi_device_transmit(spi, &t), TAG, "Failed to transmit SPI transaction");
 
-    *data = t.rx_data[1];
+    response->raw = ((uint16_t)t.rx_data[0] << 8U) | t.rx_data[1];
+    ESP_RETURN_ON_FALSE(tuss4470_spi_set_parity(response->raw) == response->raw,
+                        ESP_ERR_INVALID_CRC, TAG, "Invalid response parity");
     return ESP_OK;
 }

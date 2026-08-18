@@ -2,8 +2,19 @@
 
 #include "esp_bit_defs.h"
 
-#define TUSS4470_REGISTER_VDRV_CONTROL       0x16U
-#define TUSS4470_REGISTER_STATUS             0x1CU
+#define TUSS4470_REGISTER_BPF_CONFIG_1              0x10U
+#define TUSS4470_REGISTER_BPF_CONFIG_2              0x11U
+#define TUSS4470_REGISTER_DEV_CTRL_1                0x12U
+#define TUSS4470_REGISTER_DEV_CTRL_2                0x13U
+#define TUSS4470_REGISTER_DEV_CTRL_3                0x14U
+#define TUSS4470_REGISTER_VDRV_CTRL                 0x16U
+#define TUSS4470_REGISTER_ECHO_INT_CONFIG           0x17U
+#define TUSS4470_REGISTER_ZC_CONFIG                 0x18U
+#define TUSS4470_REGISTER_BURST_PULSE               0x1AU
+#define TUSS4470_REGISTER_TOF_CONFIG                0x1BU
+#define TUSS4470_REGISTER_DEV_STAT                  0x1CU
+#define TUSS4470_REGISTER_DEVICE_ID                 0x1DU
+#define TUSS4470_REGISTER_REV_ID                    0x1EU
 
 #define TUSS4470_FRAME_READ                  BIT(15)
 #define TUSS4470_FRAME_ADDRESS_SHIFT         9U
