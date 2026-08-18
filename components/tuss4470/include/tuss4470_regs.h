@@ -2,6 +2,9 @@
 
 #include "esp_bit_defs.h"
 
+#define TUSS4470_REGISTER_VDRV_CONTROL       0x16U
+#define TUSS4470_REGISTER_STATUS             0x1CU
+
 #define TUSS4470_FRAME_READ                  BIT(15)
 #define TUSS4470_FRAME_ADDRESS_SHIFT         9U
 #define TUSS4470_FRAME_ADDRESS_MASK          0x3FU
