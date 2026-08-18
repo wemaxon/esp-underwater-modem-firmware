@@ -1,5 +1,6 @@
 #include "tuss4470.h"
 
+#include "driver/gpio.h"
 #include "esp_check.h"
 #include "esp_log.h"
 
@@ -72,7 +73,7 @@ void tuss4470_log_status(tuss4470_status_t* status)
 esp_err_t tuss4470_init(tuss4470_config_t *config){
     ESP_RETURN_ON_FALSE(config != NULL, ESP_ERR_INVALID_ARG, TAG, "config is NULL");
     ESP_RETURN_ON_FALSE(config->host_id < SPI_HOST_MAX, ESP_ERR_INVALID_ARG, TAG, "Invalid host_id");
-    ESP_RETURN_ON_FALSE(config->spics_io_num >= 0, ESP_ERR_INVALID_ARG, TAG, "Invalid spics_io_num");
+    ESP_RETURN_ON_FALSE(GPIO_IS_VALID_OUTPUT_GPIO(config->spics_io_num), ESP_ERR_INVALID_ARG, TAG, "Invalid spics_io_num");
     ESP_RETURN_ON_FALSE(config->io1_io_num >= 0, ESP_ERR_INVALID_ARG, TAG, "Invalid io1_io_num");
     ESP_RETURN_ON_FALSE(config->io2_io_num >= 0, ESP_ERR_INVALID_ARG, TAG, "Invalid io2_io_num");
     ESP_RETURN_ON_FALSE(config->out3_io_num >= 0, ESP_ERR_INVALID_ARG, TAG, "Invalid out3_io_num");
@@ -85,6 +86,8 @@ esp_err_t tuss4470_init(tuss4470_config_t *config){
         .clock_speed_hz = 100000,
         .mode = 1,
         .spics_io_num = tuss4470.config.spics_io_num,
+        .cs_ena_pretrans = 2,
+        .cs_ena_posttrans = 2,
         .queue_size = 1,
     };
     ESP_RETURN_ON_ERROR(spi_bus_add_device(tuss4470.config.host_id, &devcfg, &tuss4470.spi_device), TAG, "Failed to add SPI device");
@@ -107,12 +110,12 @@ esp_err_t tuss4470_init(tuss4470_config_t *config){
     ESP_LOGI(TAG, "VDRV_CTRL raw=%04X status=%02X payload=%02X parity=%u previous_error=%u", spi_response.raw, spi_response.status, spi_response.payload, spi_response.parity, spi_response.previous_frame_parity_error);   
 
 
-    // // Enable VDRV
-    // tuss4470_spi_write_register(tuss4470.spi_device, TUSS4470_REGISTER_VDRV_CTRL, 0x00, &spi_response);
-    // ESP_LOGI(TAG, "Wrote VDRV_CTRL register: %02X", 0x00);
+    // Enable VDRV
+    tuss4470_spi_write_register(tuss4470.spi_device, TUSS4470_REGISTER_VDRV_CTRL, 0x00, &spi_response);
+    ESP_LOGI(TAG, "Wrote VDRV_CTRL register: %02X", 0x00);
 
-    // ESP_RETURN_ON_ERROR(tuss4470_spi_read_register(tuss4470.spi_device, TUSS4470_REGISTER_VDRV_CTRL, &spi_response), TAG, "Failed to read VDRV_CTRL register");
-    // ESP_LOGI(TAG, "Read VDRV_CTRL register: %02X", spi_response.payload);
+    ESP_RETURN_ON_ERROR(tuss4470_spi_read_register(tuss4470.spi_device, TUSS4470_REGISTER_VDRV_CTRL, &spi_response), TAG, "Failed to read VDRV_CTRL register");
+    ESP_LOGI(TAG, "Read VDRV_CTRL register: %02X", spi_response.payload);
 
     // // set burst pulse
     // tuss4470_spi_write_register(tuss4470.spi_device, TUSS4470_REGISTER_BURST_PULSE, TUSS4470_BURST_PULSE_MASK | 16, &response);
