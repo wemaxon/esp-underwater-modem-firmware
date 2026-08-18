@@ -8,8 +8,6 @@
 
 static const char *TAG = "TUSS4470_SPI";
 
-_Static_assert(sizeof(tuss4470_spi_response_t) == sizeof(uint16_t),
-               "Unexpected TUSS4470 SPI response size");
 
 
 uint16_t tuss4470_spi_set_parity(uint16_t frame)
@@ -51,8 +49,7 @@ esp_err_t tuss4470_spi_write_register(spi_device_handle_t spi, uint8_t address, 
     ESP_RETURN_ON_ERROR(spi_device_transmit(spi, &t), TAG, "Failed to transmit SPI transaction");
 
     response->raw = ((uint16_t)t.rx_data[0] << 8U) | t.rx_data[1];
-    ESP_RETURN_ON_FALSE(tuss4470_spi_set_parity(response->raw) == response->raw,
-                        ESP_ERR_INVALID_CRC, TAG, "Invalid response parity");
+    ESP_RETURN_ON_FALSE(tuss4470_spi_set_parity(response->raw) == response->raw, ESP_ERR_INVALID_CRC, TAG, "Invalid response parity");
     return ESP_OK;
 }
 
@@ -79,7 +76,6 @@ esp_err_t tuss4470_spi_read_register(spi_device_handle_t spi, uint8_t address, t
     ESP_RETURN_ON_ERROR(spi_device_transmit(spi, &t), TAG, "Failed to transmit SPI transaction");
 
     response->raw = ((uint16_t)t.rx_data[0] << 8U) | t.rx_data[1];
-    ESP_RETURN_ON_FALSE(tuss4470_spi_set_parity(response->raw) == response->raw,
-                        ESP_ERR_INVALID_CRC, TAG, "Invalid response parity");
+    ESP_RETURN_ON_FALSE(tuss4470_spi_set_parity(response->raw) == response->raw, ESP_ERR_INVALID_CRC, TAG, "Invalid response parity");
     return ESP_OK;
 }

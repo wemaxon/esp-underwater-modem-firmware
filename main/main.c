@@ -40,8 +40,13 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(tuss4470_init(&config));
 
+
+
+    tuss4470_status_t status;
     while(1) {
-        vTaskDelay(pdMS_TO_TICKS(3000));
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        tuss4470_get_status(&status);
+        tuss4470_log_status(&status);
     }
 
 }
