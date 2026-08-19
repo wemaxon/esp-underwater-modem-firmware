@@ -1,20 +1,55 @@
 #include "tuss4470.h"
 
 #include "driver/gpio.h"
+#include "driver/rmt_tx.h"
 #include "esp_check.h"
 #include "esp_log.h"
 
 #include "tuss4470_regs.h"
 #include "tuss4470_spi.h"
 
+
+#define BURST_RMT_RESOLUTION_HZ     20000000U
+
+
 typedef struct {
     tuss4470_config_t config;
     spi_device_handle_t spi_device;
+
+    rmt_channel_handle_t rmt_tx_channel;
+    rmt_encoder_handle_t rmt_encoder;
 } tuss4470_t;
 
 
 static const char *TAG = "TUSS4470";
 static tuss4470_t tuss4470;
+
+esp_err_t tuss4470_send_burst(uint32_t frequency_hz, uint8_t pulse_count){
+    uint16_t half_period_ticks = BURST_RMT_RESOLUTION_HZ / (2U * frequency_hz);
+
+    rmt_symbol_word_t period = {
+        .level0 = 0,
+        .duration0 = half_period_ticks,
+        .level1 = 1,
+        .duration1 = half_period_ticks,
+    };
+
+    rmt_transmit_config_t transmit_config = {
+        .loop_count = pulse_count,
+        .flags.eot_level = 1,
+    };
+
+    ESP_RETURN_ON_ERROR(gpio_set_level(tuss4470.config.io1_io_num, 0), TAG, "Failed to enable burst");
+
+    esp_err_t err = rmt_transmit(tuss4470.rmt_tx_channel, tuss4470.rmt_encoder, &period, sizeof(period), &transmit_config );
+
+    if (err == ESP_OK) {
+        err = rmt_tx_wait_all_done(tuss4470.rmt_tx_channel, 10);
+    }
+
+    gpio_set_level(tuss4470.config.io1_io_num, 1);
+    return err;
+}
 
 
 esp_err_t tuss4470_get_status(tuss4470_status_t *status)
@@ -135,6 +170,30 @@ esp_err_t tuss4470_init(tuss4470_config_t *config){
     ESP_RETURN_ON_ERROR(tuss4470_spi_read_register(tuss4470.spi_device, TUSS4470_REGISTER_REV_ID, &spi_response), TAG, "Failed to read REV_ID register");
     ESP_LOGI(TAG, "REV_ID raw=0x%04X status=0x%02X payload=0x%02X parity=%u previous_error=%u", spi_response.raw, spi_response.status, spi_response.payload, spi_response.parity, spi_response.previous_frame_parity_error);   
 
+
+    gpio_config_t io_config = {
+        .pin_bit_mask = 1 << tuss4470.config.io1_io_num,
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+    };
+    ESP_RETURN_ON_ERROR(gpio_config(&io_config), TAG, "Failed to set gpio config");
+    ESP_RETURN_ON_ERROR(gpio_set_level(tuss4470.config.io1_io_num, 1), TAG, "Failed to set gpio io1 level");
+
+    rmt_tx_channel_config_t channel_config = {
+        .gpio_num = tuss4470.config.io2_io_num,
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .resolution_hz = BURST_RMT_RESOLUTION_HZ,
+        .mem_block_symbols = 64,
+        .trans_queue_depth = 1,
+        .flags.init_level = 1,
+    };
+    
+    ESP_RETURN_ON_ERROR(rmt_new_tx_channel(&channel_config, &(tuss4470.rmt_tx_channel)), TAG, "Failed to create rmt rx channel");
+
+    rmt_copy_encoder_config_t encoder_config = {};
+    ESP_RETURN_ON_ERROR(rmt_new_copy_encoder(&encoder_config, &(tuss4470.rmt_encoder)), TAG, "Failed to create rmt copy encoder");
+    ESP_RETURN_ON_ERROR(rmt_enable(tuss4470.rmt_tx_channel), TAG, "Failed to enable rmt tx channel");
 
     ESP_LOGI(TAG, "TUSS4470 initialized");
     return ESP_OK;
