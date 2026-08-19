@@ -33,7 +33,7 @@ esp_err_t tuss4470_get_status(tuss4470_status_t *status)
     return ESP_OK;
 }
 
-uint8_t tuss4470_has_fault(tuss4470_status_t *status)
+bool tuss4470_has_fault(tuss4470_status_t *status)
 {
     return status->ee_crc_flt || status->drv_pulse_flt || status->pulse_num_flt || !status->vdrv_ready ;
 }
@@ -68,6 +68,36 @@ void tuss4470_log_status(tuss4470_status_t* status)
     }
 }
 
+esp_err_t tuss4470_set_io_mode(tuss4470_io_mode_t io_mode){
+    ESP_RETURN_ON_FALSE(io_mode <= TUSS4470_IO_MODE_3, ESP_ERR_INVALID_ARG, TAG, "Invalid io_mode");
+
+    tuss4470_spi_response_t spi_response = {0};
+    ESP_RETURN_ON_ERROR(tuss4470_spi_read_register(tuss4470.spi_device, TUSS4470_REGISTER_DEV_CTRL_3, &spi_response), TAG, "Failed to read IO_MODE register");
+
+    uint8_t value = spi_response.payload;
+    value &= (uint8_t)~TUSS4470_DEV3_IO_MODE_MASK;
+    value |= (uint8_t)io_mode;
+
+    ESP_RETURN_ON_ERROR(tuss4470_spi_write_register(tuss4470.spi_device, TUSS4470_REGISTER_DEV_CTRL_3, value, &spi_response), TAG, "Failed to write IO_MODE register");
+    ESP_LOGV(TAG, "DEV_CTRL_3 raw=0x%04X status=0x%02X payload=0x%02X parity=%u previous_error=%u", spi_response.raw, spi_response.status, spi_response.payload, spi_response.parity, spi_response.previous_frame_parity_error);
+    return ESP_OK;
+}
+
+esp_err_t tuss4470_set_vdrv(bool enabled) {
+    tuss4470_spi_response_t spi_response;
+    ESP_RETURN_ON_ERROR(tuss4470_spi_read_register(tuss4470.spi_device, TUSS4470_REGISTER_VDRV_CTRL, &spi_response), TAG, "Failed to read VDRV_CTRL register");
+
+    uint8_t value = spi_response.payload;
+    value &= (uint8_t)~TUSS4470_VDRV_HIGH_Z;
+
+    if(!enabled){
+        value |= TUSS4470_VDRV_HIGH_Z;
+    }
+
+    tuss4470_spi_write_register(tuss4470.spi_device, TUSS4470_REGISTER_VDRV_CTRL, value, &spi_response);
+    ESP_LOGI(TAG, "VDRV_CTRL raw=0x%04X status=0x%02X payload=0x%02X parity=%u previous_error=%u", spi_response.raw, spi_response.status, spi_response.payload, spi_response.parity, spi_response.previous_frame_parity_error);   
+    return ESP_OK;
+}
 
 
 esp_err_t tuss4470_init(tuss4470_config_t *config){
@@ -93,34 +123,17 @@ esp_err_t tuss4470_init(tuss4470_config_t *config){
     ESP_RETURN_ON_ERROR(spi_bus_add_device(tuss4470.config.host_id, &devcfg, &tuss4470.spi_device), TAG, "Failed to add SPI device");
     ESP_LOGI(TAG, "Added TUSS4470 spi device");
 
-
     // tuss4470_status_t status = {0};
     // ESP_RETURN_ON_ERROR(tuss4470_get_status(&status), TAG, "Failed to read status register");
     // tuss4470_log_status(&status);
-    // ESP_RETURN_ON_FALSE(!tuss4470_has_fault(&status), ESP_ERR_INVALID_STATE, TAG, "TUSS4470 status error: %02X", status.raw);
+    // ESP_RETURN_ON_FALSE(!tuss4470_has_fault(&status), ESP_ERR_INVALID_STATE, TAG, "TUSS4470 status error: 0x%02X", status.raw);
 
     tuss4470_spi_response_t spi_response;
     ESP_RETURN_ON_ERROR(tuss4470_spi_read_register(tuss4470.spi_device, TUSS4470_REGISTER_DEVICE_ID, &spi_response), TAG, "Failed to read DEVICE_ID register");
-    ESP_LOGI(TAG, "DEVICE_ID raw=%04X status=%02X payload=%02X parity=%u previous_error=%u", spi_response.raw, spi_response.status, spi_response.payload, spi_response.parity, spi_response.previous_frame_parity_error);   
+    ESP_LOGI(TAG, "DEVICE_ID raw=0x%04X status=0x%02X payload=0x%02X parity=%u previous_error=%u", spi_response.raw, spi_response.status, spi_response.payload, spi_response.parity, spi_response.previous_frame_parity_error);   
 
     ESP_RETURN_ON_ERROR(tuss4470_spi_read_register(tuss4470.spi_device, TUSS4470_REGISTER_REV_ID, &spi_response), TAG, "Failed to read REV_ID register");
-    ESP_LOGI(TAG, "REV_ID raw=%04X status=%02X payload=%02X parity=%u previous_error=%u", spi_response.raw, spi_response.status, spi_response.payload, spi_response.parity, spi_response.previous_frame_parity_error);   
-
-    ESP_RETURN_ON_ERROR(tuss4470_spi_read_register(tuss4470.spi_device, TUSS4470_REGISTER_VDRV_CTRL, &spi_response), TAG, "Failed to read VDRV_CTRL register");
-    ESP_LOGI(TAG, "VDRV_CTRL raw=%04X status=%02X payload=%02X parity=%u previous_error=%u", spi_response.raw, spi_response.status, spi_response.payload, spi_response.parity, spi_response.previous_frame_parity_error);   
-
-
-    // Enable VDRV
-    tuss4470_spi_write_register(tuss4470.spi_device, TUSS4470_REGISTER_VDRV_CTRL, 0x00, &spi_response);
-    ESP_LOGI(TAG, "Wrote VDRV_CTRL register: %02X", 0x00);
-
-    ESP_RETURN_ON_ERROR(tuss4470_spi_read_register(tuss4470.spi_device, TUSS4470_REGISTER_VDRV_CTRL, &spi_response), TAG, "Failed to read VDRV_CTRL register");
-    ESP_LOGI(TAG, "Read VDRV_CTRL register: %02X", spi_response.payload);
-
-    // // set burst pulse
-    // tuss4470_spi_write_register(tuss4470.spi_device, TUSS4470_REGISTER_BURST_PULSE, TUSS4470_BURST_PULSE_MASK | 16, &response);
-
-
+    ESP_LOGI(TAG, "REV_ID raw=0x%04X status=0x%02X payload=0x%02X parity=%u previous_error=%u", spi_response.raw, spi_response.status, spi_response.payload, spi_response.parity, spi_response.previous_frame_parity_error);   
 
 
     ESP_LOGI(TAG, "TUSS4470 initialized");

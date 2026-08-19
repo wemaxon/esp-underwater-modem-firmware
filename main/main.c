@@ -40,6 +40,8 @@ void app_main(void)
     };
     ESP_ERROR_CHECK(tuss4470_init(&config));
 
+    ESP_ERROR_CHECK(tuss4470_set_io_mode(TUSS4470_IO_MODE_1));
+    ESP_ERROR_CHECK(tuss4470_set_vdrv(true));
 
 
     tuss4470_status_t status;

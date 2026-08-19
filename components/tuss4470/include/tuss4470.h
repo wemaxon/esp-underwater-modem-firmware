@@ -16,11 +16,18 @@ typedef struct {
 } tuss4470_config_t;
 
 typedef enum {
-    TUSS4470_DEV_STATE_LISTEN,
-    TUSS4470_DEV_STATE_BURST,
-    TUSS4470_DEV_STATE_STANDBY,
-    TUSS4470_DEV_STATE_SLEEP
+    TUSS4470_DEV_STATE_LISTEN = 0x00,
+    TUSS4470_DEV_STATE_BURST = 0x01,
+    TUSS4470_DEV_STATE_STANDBY = 0x02,
+    TUSS4470_DEV_STATE_SLEEP = 0x03
 } tuss4470_dev_state_t;
+
+typedef enum {
+    TUSS4470_IO_MODE_0 = 0x00,
+    TUSS4470_IO_MODE_1 = 0x01,
+    TUSS4470_IO_MODE_2 = 0x02,
+    TUSS4470_IO_MODE_3 = 0x03
+} tuss4470_io_mode_t;
 
 typedef union {
     uint8_t raw;
@@ -38,4 +45,6 @@ typedef union {
 esp_err_t tuss4470_init(tuss4470_config_t *config);
 esp_err_t tuss4470_get_status(tuss4470_status_t *status);
 void tuss4470_log_status(tuss4470_status_t *status);
-uint8_t tuss4470_has_fault(tuss4470_status_t *status);
+bool tuss4470_has_fault(tuss4470_status_t *status);
+esp_err_t tuss4470_set_io_mode(tuss4470_io_mode_t io_mode);
+esp_err_t tuss4470_set_vdrv(bool enabled);
