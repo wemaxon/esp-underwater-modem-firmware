@@ -3,6 +3,7 @@ idf_component_register(
         "tuss4470.c"
         "tuss4470_spi.c"
         "tuss4470_rmt.c"
+        "tuss4470_io.c"
 
     INCLUDE_DIRS
         "include"
