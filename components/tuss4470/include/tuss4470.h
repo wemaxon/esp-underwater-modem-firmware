@@ -1,6 +1,7 @@
 #pragma once
 
 #include "esp_err.h"
+#include "driver/rmt_types.h"
 #include "driver/spi_master.h"
 
 
@@ -42,6 +43,12 @@ typedef union {
     };
 } tuss4470_status_t;
 
+typedef struct {
+    const rmt_symbol_word_t *symbols;
+    size_t num_symbols;
+} tuss4470_rx_capture_t;
+
+
 esp_err_t tuss4470_init(tuss4470_config_t *config);
 esp_err_t tuss4470_get_status(tuss4470_status_t *status);
 void tuss4470_log_status(tuss4470_status_t *status);
@@ -51,3 +58,5 @@ esp_err_t tuss4470_set_vdrv(bool enabled);
 esp_err_t tuss4470_wait_vdrv_ready(uint32_t timeout_ms);
 
 esp_err_t tuss4470_send_burst(uint32_t frequency_hz, uint8_t pulse_count);
+esp_err_t tuss4470_receive_start(void);
+esp_err_t tuss4470_receive_wait(tuss4470_rx_capture_t *capture, uint32_t timeout_ms);

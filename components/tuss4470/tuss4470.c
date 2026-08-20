@@ -19,8 +19,7 @@ typedef struct {
     tuss4470_config_t config;
     spi_device_handle_t spi_device;
 
-    rmt_channel_handle_t rmt_tx_channel;
-    rmt_encoder_handle_t rmt_encoder;
+    tuss4470_rmt_t rmt;
 } tuss4470_t;
 
 
@@ -45,10 +44,10 @@ esp_err_t tuss4470_send_burst(uint32_t frequency_hz, uint8_t pulse_count){
 
     ESP_RETURN_ON_ERROR(gpio_set_level(tuss4470.config.io1_io_num, 0), TAG, "Failed to enable burst");
 
-    esp_err_t err = rmt_transmit(tuss4470.rmt_tx_channel, tuss4470.rmt_encoder, &period, sizeof(period), &transmit_config );
+    esp_err_t err = rmt_transmit(tuss4470.rmt.tx_channel, tuss4470.rmt.rmt_encoder, &period, sizeof(period), &transmit_config );
 
     if (err == ESP_OK) {
-        err = rmt_tx_wait_all_done(tuss4470.rmt_tx_channel, 10);
+        err = rmt_tx_wait_all_done(tuss4470.rmt.tx_channel, 10);
     }
 
     gpio_set_level(tuss4470.config.io1_io_num, 1);
@@ -73,7 +72,7 @@ esp_err_t tuss4470_get_status(tuss4470_status_t *status)
 
 bool tuss4470_has_fault(tuss4470_status_t *status)
 {
-    return status->ee_crc_flt || status->drv_pulse_flt || status->pulse_num_flt || !status->vdrv_ready ;
+    return status->ee_crc_flt || status->drv_pulse_flt || status->pulse_num_flt;
 }
 
 void tuss4470_log_status(tuss4470_status_t* status)
@@ -132,7 +131,7 @@ esp_err_t tuss4470_set_vdrv(bool enabled) {
         value |= TUSS4470_VDRV_HIGH_Z;
     }
 
-    tuss4470_spi_write_register(tuss4470.spi_device, TUSS4470_REGISTER_VDRV_CTRL, value, &spi_response);
+    ESP_RETURN_ON_ERROR(tuss4470_spi_write_register(tuss4470.spi_device, TUSS4470_REGISTER_VDRV_CTRL, value, &spi_response), TAG, "Failed to write VDRV_CTRL register");
     ESP_LOGI(TAG, "VDRV_CTRL raw=0x%04X status=0x%02X payload=0x%02X parity=%u previous_error=%u", spi_response.raw, spi_response.status, spi_response.payload, spi_response.parity, spi_response.previous_frame_parity_error);   
     return ESP_OK;
 }
@@ -154,6 +153,33 @@ esp_err_t tuss4470_wait_vdrv_ready(uint32_t timeout_ms)
     } while (esp_timer_get_time() < deadline_us);
 
     return ESP_ERR_TIMEOUT;
+}
+
+static esp_err_t tuss4470_set_out3(void) {
+    tuss4470_spi_response_t spi_response = {0};
+
+    ESP_RETURN_ON_ERROR(tuss4470_spi_read_register(tuss4470.spi_device, TUSS4470_REGISTER_ZC_CONFIG, &spi_response), TAG, "Failed to read ZC_CONFIG register");
+
+    uint8_t value = spi_response.payload | TUSS4470_ZC_ENABLE;
+
+    ESP_RETURN_ON_ERROR(tuss4470_spi_write_register(tuss4470.spi_device, TUSS4470_REGISTER_ZC_CONFIG, value, &spi_response), TAG, "Failed to write ZC_CONFIG register");
+    ESP_LOGI(TAG, "ZC_CONFIG raw=0x%04X status=0x%02X payload=0x%02X parity=%u previous_error=%u", spi_response.raw, spi_response.status, spi_response.payload, spi_response.parity, spi_response.previous_frame_parity_error);
+
+    return ESP_OK;
+}
+
+esp_err_t tuss4470_receive_start(void){
+    ESP_RETURN_ON_FALSE(tuss4470.spi_device != NULL, ESP_ERR_INVALID_STATE, TAG, "TUSS4470 not initialized");
+    return tuss4470_rmt_receive_start(&tuss4470.rmt);
+}
+
+esp_err_t tuss4470_receive_wait(tuss4470_rx_capture_t *capture, uint32_t timeout_ms){
+    ESP_RETURN_ON_FALSE(capture != NULL, ESP_ERR_INVALID_ARG, TAG, "capture is NULL");
+
+    capture->symbols = NULL;
+    capture->num_symbols = 0;
+
+    return tuss4470_rmt_receive_wait(&tuss4470.rmt, &capture->symbols, &capture->num_symbols, timeout_ms);
 }
 
 
@@ -192,9 +218,11 @@ esp_err_t tuss4470_init(tuss4470_config_t *config){
     ESP_RETURN_ON_ERROR(tuss4470_spi_read_register(tuss4470.spi_device, TUSS4470_REGISTER_REV_ID, &spi_response), TAG, "Failed to read REV_ID register");
     ESP_LOGI(TAG, "REV_ID raw=0x%04X status=0x%02X payload=0x%02X parity=%u previous_error=%u", spi_response.raw, spi_response.status, spi_response.payload, spi_response.parity, spi_response.previous_frame_parity_error);   
 
+    ESP_RETURN_ON_ERROR(tuss4470_set_out3(), TAG, "Failed to configure OUT3");
+
     ESP_RETURN_ON_ERROR(tuss4470_io_init(tuss4470.config.io1_io_num), TAG, "Failed to init io");
 
-    ESP_RETURN_ON_ERROR(tuss4470_rmt_init(&tuss4470.rmt_tx_channel, &tuss4470.rmt_encoder, tuss4470.config.io2_io_num), TAG, "Failed to init rmt");
+    ESP_RETURN_ON_ERROR(tuss4470_rmt_init(&tuss4470.rmt, tuss4470.config.io2_io_num, tuss4470.config.out3_io_num), TAG, "Failed to init rmt");
 
     ESP_LOGI(TAG, "TUSS4470 initialized");
     return ESP_OK;

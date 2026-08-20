@@ -44,21 +44,43 @@ void app_main(void)
     ESP_ERROR_CHECK(tuss4470_set_vdrv(true));
 
 
-    tuss4470_status_t status;
     while(1) {
+        tuss4470_status_t status = {0};
         esp_err_t err = tuss4470_get_status(&status);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "Failed to get status: %s", esp_err_to_name(err));
+        } else {
+            tuss4470_log_status(&status);
         }
-        tuss4470_log_status(&status);
 
         if (tuss4470_wait_vdrv_ready(100) == ESP_OK){
+            err = tuss4470_receive_start();
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to start receive capture: %s", esp_err_to_name(err));
+                vTaskDelay(pdMS_TO_TICKS(2000));
+                continue;
+            }
+
             err = tuss4470_send_burst(40000, 32);
             if (err != ESP_OK) {
                 ESP_LOGE(TAG, "Failed to send burst: %s", esp_err_to_name(err));
             }
             else {
                 ESP_LOGI(TAG, "Sent burst");
+
+                tuss4470_rx_capture_t capture = {0};
+                err = tuss4470_receive_wait(&capture, 50);
+                if (err == ESP_OK) {
+                    ESP_LOGI(TAG, "Captured %u OUT3 symbols", (unsigned)capture.num_symbols);
+
+                    size_t symbols_to_log = capture.num_symbols < 16 ? capture.num_symbols : 16;
+                    for (size_t i = 0; i < symbols_to_log; i++) {
+                        const rmt_symbol_word_t *symbol = &capture.symbols[i];
+                        ESP_LOGI(TAG, "OUT3[%u]: level0=%u duration0=%u level1=%u duration1=%u", (unsigned)i, symbol->level0, symbol->duration0, symbol->level1, symbol->duration1);
+                    }
+                } else {
+                    ESP_LOGW(TAG, "OUT3 capture failed: %s", esp_err_to_name(err));
+                }
             }
         }
         else{
