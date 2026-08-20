@@ -4,6 +4,10 @@
 #include "driver/rmt_tx.h"
 #include "esp_check.h"
 #include "esp_log.h"
+#include "esp_timer.h"
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
 #include "tuss4470_io.h"
 #include "tuss4470_regs.h"
@@ -131,6 +135,25 @@ esp_err_t tuss4470_set_vdrv(bool enabled) {
     tuss4470_spi_write_register(tuss4470.spi_device, TUSS4470_REGISTER_VDRV_CTRL, value, &spi_response);
     ESP_LOGI(TAG, "VDRV_CTRL raw=0x%04X status=0x%02X payload=0x%02X parity=%u previous_error=%u", spi_response.raw, spi_response.status, spi_response.payload, spi_response.parity, spi_response.previous_frame_parity_error);   
     return ESP_OK;
+}
+
+esp_err_t tuss4470_wait_vdrv_ready(uint32_t timeout_ms)
+{
+    const int64_t deadline_us = esp_timer_get_time() + ((int64_t)timeout_ms * 1000);
+
+    do {
+        tuss4470_status_t status = {0};
+
+        ESP_RETURN_ON_ERROR(tuss4470_get_status(&status), TAG, "Failed to read status");
+
+        if (status.vdrv_ready) {
+            return ESP_OK;
+        }
+
+        vTaskDelay(1);
+    } while (esp_timer_get_time() < deadline_us);
+
+    return ESP_ERR_TIMEOUT;
 }
 
 

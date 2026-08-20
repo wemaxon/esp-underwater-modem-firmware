@@ -48,5 +48,6 @@ void tuss4470_log_status(tuss4470_status_t *status);
 bool tuss4470_has_fault(tuss4470_status_t *status);
 esp_err_t tuss4470_set_io_mode(tuss4470_io_mode_t io_mode);
 esp_err_t tuss4470_set_vdrv(bool enabled);
+esp_err_t tuss4470_wait_vdrv_ready(uint32_t timeout_ms);
 
 esp_err_t tuss4470_send_burst(uint32_t frequency_hz, uint8_t pulse_count);

@@ -46,21 +46,25 @@ void app_main(void)
 
     tuss4470_status_t status;
     while(1) {
-        vTaskDelay(pdMS_TO_TICKS(2000));
-
-        esp_err_t err = tuss4470_send_burst(40000, 32);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to send burst: %s", esp_err_to_name(err));
-        }
-        else {
-            ESP_LOGI(TAG, "Sent burst");
-        }
-
-        err = tuss4470_get_status(&status);
+        esp_err_t err = tuss4470_get_status(&status);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "Failed to get status: %s", esp_err_to_name(err));
         }
         tuss4470_log_status(&status);
-    }
 
+        if (tuss4470_wait_vdrv_ready(100) == ESP_OK){
+            err = tuss4470_send_burst(40000, 32);
+            if (err != ESP_OK) {
+                ESP_LOGE(TAG, "Failed to send burst: %s", esp_err_to_name(err));
+            }
+            else {
+                ESP_LOGI(TAG, "Sent burst");
+            }
+        }
+        else{
+            ESP_LOGW(TAG, "VDRV did not become ready" );
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
 }
