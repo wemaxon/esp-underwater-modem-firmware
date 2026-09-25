@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/MightyPork/PonyFrame",
+  "revision": "5f2e8d9af67704529a6df8b66a0fd6b90806b3cd",
+  "sha256": {
+    "TinyFrame.py": "e312b923ed08934d39efc663a741fb495683c5571329f86237afbfb9bfac5d19",
+    "PayloadBuilder.py": "dc33d20b027143e8da3a00499c5a150f1d33484019760f4c24369f16864d521e",
+    "PayloadParser.py": "e2d73f37911ac780a2b467686039b8b584d55a7d0298536b1e35b56dc7261e6c",
+    "LICENSE": "1f256ecad192880510e84ad60474eab7589218784b9a50bc7ceee34c2b91f1d5",
+    "README.md": "0f9238a1ed8c2bf8c3a6a70b582177f00ead29c99853b179df8023384388f30e"
+  }
+}

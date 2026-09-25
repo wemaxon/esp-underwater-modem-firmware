@@ -1,0 +1,11 @@
+{
+  "repository": "https://github.com/MightyPork/TinyFrame",
+  "revision": "a29167a69f052975b0e0134a73b4d31d03afa8fa",
+  "sha256": {
+    "TinyFrame.c": "24c2712966df846fadf54067ac5ed4061e4a19adf11dab1af3f203e17bf41eab",
+    "TinyFrame.h": "e70ea75c3642fff3f1b28463d4b564402efcd09824b51db7b556cf3a04319b7f",
+    "LICENSE": "eb7b9df3ca390100d31f9aac23f2d8dfe0183a63987112675fc58af9a42f6874",
+    "README.md": "6bf771feb1981cbf0bfc079ee5834212911c4a50c3946aeb84dc43d1af9afa41",
+    "TF_Config.example.h": "e5faec9f64114f99b744e48de5b1d3de631e3065129004c664197681359aa2f6"
+  }
+}
