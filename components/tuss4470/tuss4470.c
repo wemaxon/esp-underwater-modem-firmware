@@ -28,6 +28,18 @@ typedef struct {
 static const char *TAG = "TUSS4470";
 static tuss4470_t tuss4470;
 
+static void log_register_write(const char *name, uint8_t address, uint8_t expected)
+{
+    tuss4470_spi_response_t response;
+    esp_err_t error = tuss4470_spi_read_register(tuss4470.spi_device, address, &response);
+    if (error != ESP_OK) {
+        ESP_LOGW(TAG, "%s readback failed: %s", name, esp_err_to_name(error));
+    } else if (response.previous_frame_parity_error || response.payload != expected) {
+        ESP_LOGE(TAG, "%s write mismatch: requested=0x%02X readback=0x%02X previous_parity_error=%u", name, expected, response.payload, response.previous_frame_parity_error);
+    } else {
+        ESP_LOGI(TAG, "%s readback=0x%02X", name, response.payload);
+    }
+}
 
 esp_err_t tuss4470_send_burst(uint32_t frequency_hz, uint16_t cycles)
 {
@@ -88,25 +100,7 @@ void tuss4470_log_status(tuss4470_status_t* status)
         "SLEEP",
     };
 
-    ESP_LOGI(TAG, "Device state: %s", state_names[status->dev_state]);
-
-    if (status->vdrv_ready) {
-        ESP_LOGI(TAG, "VDRV ready");
-    } else {
-        ESP_LOGW(TAG, "VDRV not ready");
-    }
-
-    if (status->pulse_num_flt) {
-        ESP_LOGW(TAG, "Pulse number fault");
-    }
-
-    if (status->drv_pulse_flt) {
-        ESP_LOGW(TAG, "Driver pulse fault");
-    }
-
-    if (status->ee_crc_flt) {
-        ESP_LOGW(TAG, "EEPROM CRC fault");
-    }
+    ESP_LOGI(TAG, "Status=0x%02X state=%s VDRV_ready=%u pulse_count_fault=%u driver_pulse_fault=%u EEPROM_fault=%u", status->raw, state_names[status->dev_state], status->vdrv_ready, status->pulse_num_flt, status->drv_pulse_flt, status->ee_crc_flt);
 }
 
 esp_err_t tuss4470_set_io_mode(tuss4470_io_mode_t io_mode){
@@ -120,7 +114,7 @@ esp_err_t tuss4470_set_io_mode(tuss4470_io_mode_t io_mode){
     value |= (uint8_t)io_mode;
 
     ESP_RETURN_ON_ERROR(tuss4470_spi_write_register(tuss4470.spi_device, TUSS4470_REGISTER_DEV_CTRL_3, value, &spi_response), TAG, "Failed to write IO_MODE register");
-    ESP_LOGV(TAG, "DEV_CTRL_3 raw=0x%04X status=0x%02X payload=0x%02X parity=%u previous_error=%u", spi_response.raw, spi_response.status, spi_response.payload, spi_response.parity, spi_response.previous_frame_parity_error);
+    log_register_write("DEV_CTRL_3", TUSS4470_REGISTER_DEV_CTRL_3, value);
     return ESP_OK;
 }
 
@@ -136,19 +130,21 @@ esp_err_t tuss4470_set_vdrv(bool enabled) {
     }
 
     ESP_RETURN_ON_ERROR(tuss4470_spi_write_register(tuss4470.spi_device, TUSS4470_REGISTER_VDRV_CTRL, value, &spi_response), TAG, "Failed to write VDRV_CTRL register");
-    ESP_LOGI(TAG, "VDRV_CTRL raw=0x%04X status=0x%02X payload=0x%02X parity=%u previous_error=%u", spi_response.raw, spi_response.status, spi_response.payload, spi_response.parity, spi_response.previous_frame_parity_error);   
+    log_register_write("VDRV_CTRL", TUSS4470_REGISTER_VDRV_CTRL, value);
     return ESP_OK;
 }
 
 esp_err_t tuss4470_wait_vdrv_ready(uint32_t timeout_ms)
 {
     const int64_t deadline_us = esp_timer_get_time() + ((int64_t)timeout_ms * 1000);
+    tuss4470_status_t status = {0};
 
     do {
-        tuss4470_status_t status = {0};
-
         ESP_RETURN_ON_ERROR(tuss4470_get_status(&status), TAG, "Failed to read status");
-        ESP_RETURN_ON_FALSE(!tuss4470_has_fault(&status), ESP_FAIL, TAG, "Device fault: 0x%02X", status.raw);
+        if (tuss4470_has_fault(&status)) {
+            tuss4470_log_status(&status);
+            return ESP_FAIL;
+        }
 
         if (status.vdrv_ready) {
             return ESP_OK;
@@ -157,6 +153,8 @@ esp_err_t tuss4470_wait_vdrv_ready(uint32_t timeout_ms)
         vTaskDelay(1);
     } while (esp_timer_get_time() < deadline_us);
 
+    ESP_LOGW(TAG, "VDRV not ready after %lu ms; status=0x%02X", (unsigned long)timeout_ms, status.raw);
+    tuss4470_log_status(&status);
     return ESP_ERR_TIMEOUT;
 }
 
@@ -168,7 +166,7 @@ static esp_err_t tuss4470_set_out3(void) {
     uint8_t value = spi_response.payload | TUSS4470_ZC_ENABLE;
 
     ESP_RETURN_ON_ERROR(tuss4470_spi_write_register(tuss4470.spi_device, TUSS4470_REGISTER_ZC_CONFIG, value, &spi_response), TAG, "Failed to write ZC_CONFIG register");
-    ESP_LOGI(TAG, "ZC_CONFIG raw=0x%04X status=0x%02X payload=0x%02X parity=%u previous_error=%u", spi_response.raw, spi_response.status, spi_response.payload, spi_response.parity, spi_response.previous_frame_parity_error);
+    log_register_write("ZC_CONFIG", TUSS4470_REGISTER_ZC_CONFIG, value);
 
     return ESP_OK;
 }

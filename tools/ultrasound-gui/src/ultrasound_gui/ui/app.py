@@ -6,6 +6,7 @@ from ..devices import discover_devices, open_device
 from ..session import AcquisitionState, ConnectionState, Session, SessionStatus
 from .controls import AcquisitionControls, ConnectionBar, TransmitControls
 from .plot import ScopePlot
+from .log_console import LogConsole
 
 
 class Application(tk.Tk):
@@ -26,8 +27,10 @@ class Application(tk.Tk):
         self.columnconfigure(0, weight=1)
         self.connection = ConnectionBar(self, self.refresh_devices, self.connect, self.disconnect)
         self.connection.grid(row=0, column=0, sticky="ew")
-        body = ttk.Frame(self)
-        body.grid(row=1, column=0, sticky="nsew")
+        panes = ttk.Panedwindow(self, orient="vertical")
+        panes.grid(row=1, column=0, sticky="nsew")
+        body = ttk.Frame(panes)
+        panes.add(body, weight=4)
         body.columnconfigure(0, weight=1)
         body.rowconfigure(0, weight=1)
         self.plot = ScopePlot(body)
@@ -39,6 +42,8 @@ class Application(tk.Tk):
         self.acquisition.grid(row=0, column=0, sticky="ew")
         self.transmission = TransmitControls(sidebar, self.transmit)
         self.transmission.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        self.console = LogConsole(panes)
+        panes.add(self.console, weight=1)
         self.footer = ttk.Label(self, textvariable=self.message, padding=(10, 6), anchor="w")
         self.footer.grid(row=2, column=0, sticky="ew")
         self.bind("<Configure>", self.resize_footer)
@@ -73,6 +78,7 @@ class Application(tk.Tk):
         if self.session is not None or device is None or self.closing:
             return
         self.session = Session(lambda: self.device_factory(device))
+        self.console.append([f"\n--- Connecting to {device.label} ---\n"])
         self.render_status(SessionStatus(connection=ConnectionState.CONNECTING))
         self.session.open()
 
@@ -120,6 +126,7 @@ class Application(tk.Tk):
 
     def poll(self):
         if self.session is not None:
+            self.console.append(self.session.take_logs())
             status = self.session.statuses.take()
             if status is not None:
                 self.render_status(status)
@@ -128,6 +135,7 @@ class Application(tk.Tk):
                 self.plot.show(frame)
             if self.session.done.is_set():
                 self.session.thread.join()
+                self.console.append(self.session.take_logs())
                 status = self.session.statuses.take()
                 if status is not None:
                     self.render_status(status)

@@ -1,11 +1,11 @@
 from dataclasses import dataclass, replace
 from enum import Enum
-from queue import Empty, Queue
+from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
 from time import monotonic
 
 from .model import ToneBurst
-from .protocol import CAPTURE, CANCELLED, GET_DEVICE_INFO, OK, RESULT_NAMES, STOP, TIMEOUT, TRANSMIT, Packet, ProtocolError, decode_capture, decode_info, encode_tone
+from .protocol import CAPTURE, CANCELLED, GET_DEVICE_INFO, LOG, OK, RESULT_NAMES, STOP, TIMEOUT, TRANSMIT, Packet, ProtocolError, decode_capture, decode_info, decode_log, encode_tone
 
 
 class ConnectionState(Enum):
@@ -53,6 +53,7 @@ class Session:
     def __init__(self, device_factory, timeout=3.0):
         self.device_factory, self.timeout = device_factory, timeout
         self.statuses, self.frames = Latest(), Latest()
+        self.logs = Queue(maxsize=256)
         self.commands, self.close_requested, self.done = Queue(), Event(), Event()
         self.thread = Thread(target=self._run, name="modem-session")
         self.status = SessionStatus(ConnectionState.CONNECTING)
@@ -76,6 +77,15 @@ class Session:
     def close(self):
         self.close_requested.set()
 
+    def take_logs(self):
+        entries = []
+        for _ in range(self.logs.maxsize):
+            try:
+                entries.append(self.logs.get_nowait())
+            except Empty:
+                break
+        return entries
+
     def _status(self, **changes):
         self.status = replace(self.status, **changes)
         self.statuses.put(self.status)
@@ -93,6 +103,15 @@ class Session:
             self._send(STOP)
 
     def _receive(self, packet):
+        if packet.message_type == LOG:
+            if not packet.frame_id & 0x8000:
+                raise ProtocolError("Invalid device log frame ID")
+            entry = decode_log(packet.payload)
+            try:
+                self.logs.put_nowait(entry)
+            except Full:
+                pass
+            return
         if self.status.connection == ConnectionState.CONNECTING and packet.message_type == CAPTURE:
             return
         expected = self.pending.pop(packet.message_type, None)

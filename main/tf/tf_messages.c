@@ -3,6 +3,7 @@
 #include "TinyFrame.h"
 #include "capture.h"
 #include "device_log.h"
+#include "esp_log.h"
 #include "tf/tf_protocol.h"
 #include "usb_transport.h"
 
@@ -12,6 +13,7 @@ static bool write_failed;
 static TF_ID capture_id;
 static bool logs_enabled;
 static bool sending_log;
+static const char *TAG = "TF";
 
 _Static_assert(TF_SENDBUF_LEN >= DEVICE_LOG_TEXT_CAPACITY - 1 + 14, "Log frames must fit in one transport write");
 
@@ -80,6 +82,7 @@ static TF_Result command(TinyFrame *tf, TF_Msg *message)
         tf_payload_t payload = tf_protocol_device_info("ESP32-C3 / TUSS4470", capture_clock_hz(), CAPTURE_OUT3_EDGE_CAPACITY);
         respond(message->type, message->frame_id, payload.data, payload.length);
         logs_enabled = !write_failed;
+        ESP_LOGI(TAG, "Device info requested; protocol %u", TF_USB_PROTOCOL_VERSION);
         return TF_STAY;
     } else if (message->type == TF_USB_MSG_CAPTURE) {
         capture_status_t status = capture_start();
@@ -92,6 +95,7 @@ static TF_Result command(TinyFrame *tf, TF_Msg *message)
     } else if (message->type == TF_USB_MSG_STOP) {
         result = wire_result(capture_stop());
         if (request_pending) {
+            ESP_LOGI(TAG, "Host requested capture stop; result=%u", result);
             uint8_t cancelled = result == TF_USB_RESULT_OK ? TF_USB_RESULT_CANCELLED : result;
             respond(TF_USB_MSG_CAPTURE, capture_id, &cancelled, 1);
             request_pending = false;

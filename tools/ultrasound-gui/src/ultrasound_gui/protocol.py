@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import re
 from struct import Struct
 from time import monotonic
 
@@ -12,7 +13,8 @@ GET_DEVICE_INFO = 1
 CAPTURE = 2
 STOP = 3
 TRANSMIT = 4
-VERSION = 4
+LOG = 5
+VERSION = 5
 OK, INVALID_REQUEST, BUSY, TIMEOUT, CANCELLED, OVERFLOW, DEVICE_ERROR = range(7)
 RESULT_NAMES = ("OK", "Invalid request", "Device busy", "Operation timed out", "Capture cancelled", "Capture buffer overflow", "Device error")
 _INFO = Struct("<BIH")
@@ -22,6 +24,12 @@ _TONE = Struct("<IH")
 
 def encode_tone(tone):
     return _TONE.pack(tone.frequency_hz, tone.cycles)
+
+
+def decode_log(payload):
+    if not 1 <= len(payload) <= 255:
+        raise ProtocolError("Invalid log payload")
+    return re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", payload.decode("utf-8", errors="replace"))
 
 
 class ProtocolError(ValueError):

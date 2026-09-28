@@ -83,5 +83,7 @@ esp_err_t tuss4470_rmt_init(tuss4470_rmt_t *tuss4470_rmt, gpio_num_t io2_io_num,
 
     ESP_RETURN_ON_ERROR(rmt_enable(tuss4470_rmt->tx_channel), TAG, "Failed to enable rmt tx channel");
     ESP_RETURN_ON_ERROR(rmt_enable(tuss4470_rmt->rx_channel), TAG, "Failed to enable rmt rx channel");
+    ESP_LOGI(TAG, "OUT3 RX: GPIO %d, %u Hz, %u symbols, 1 us glitch filter, 20 ms idle limit", out3_io_num, RECEIVE_RMT_RESOLUTION_HZ, TUSS4470_RX_SYMBOL_CAPACITY);
+    ESP_LOGI(TAG, "IO2 TX: GPIO %d, %u Hz clock", io2_io_num, BURST_RMT_RESOLUTION_HZ);
     return ESP_OK;
 }

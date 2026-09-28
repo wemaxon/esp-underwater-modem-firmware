@@ -6,7 +6,7 @@ import numpy as np
 import serial
 from serial.tools import list_ports
 
-from .protocol import CAPTURE, CANCELLED, GET_DEVICE_INFO, OK, STOP, TRANSMIT, VERSION, Decoder, Packet, encode
+from .protocol import CAPTURE, CANCELLED, GET_DEVICE_INFO, LOG, OK, STOP, TRANSMIT, VERSION, Decoder, Packet, encode
 
 
 @dataclass(frozen=True)
@@ -42,10 +42,16 @@ class DemoDevice:
         self.messages = []
         self.pending = None
         self.tx_pending = None
+        self.log_id = 0x8000
+
+    def _log(self, message):
+        self.messages.append(Packet(LOG, self.log_id, message.encode("utf-8")))
+        self.log_id = 0x8000 | ((self.log_id + 1) & 0x7fff)
 
     def send(self, packet):
         if packet.message_type == GET_DEVICE_INFO:
             self.messages.append(Packet(GET_DEVICE_INFO, packet.frame_id, pack("<BIH", VERSION, 1_000_000, 1023) + b"Demo OUT3"))
+            self._log("I (0) DEMO: Device connected\n")
         elif packet.message_type == CAPTURE:
             self.pending = packet
             self.ready_at = monotonic() + 0.1
@@ -63,6 +69,7 @@ class DemoDevice:
         if self.tx_pending and monotonic() >= self.tx_ready_at:
             self.messages.append(Packet(TRANSMIT, self.tx_pending.frame_id, bytes([OK])))
             self.tx_pending = None
+            self._log("I (0) DEMO: Tone burst complete\n")
         if self.pending and monotonic() >= self.ready_at:
             edges = np.arange(12, 800, 12, dtype="<u4")
             payload = pack("<BBIH", OK, 0, 1000, len(edges)) + edges.tobytes()
