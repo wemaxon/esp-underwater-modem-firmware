@@ -4,7 +4,12 @@
 #include "driver/rmt_types.h"
 #include "driver/spi_master.h"
 
+#define TUSS4470_RX_SYMBOL_CAPACITY 512U
+#define TUSS4470_RX_CLOCK_HZ        1000000U
 
+#define TUSS4470_TX_MIN_HZ          40000U
+#define TUSS4470_TX_MAX_HZ          1000000U
+#define TUSS4470_TX_MAX_CYCLES      255U
 
 typedef struct {
     spi_host_device_t host_id;
@@ -57,6 +62,7 @@ esp_err_t tuss4470_set_io_mode(tuss4470_io_mode_t io_mode);
 esp_err_t tuss4470_set_vdrv(bool enabled);
 esp_err_t tuss4470_wait_vdrv_ready(uint32_t timeout_ms);
 
-esp_err_t tuss4470_send_burst(uint32_t frequency_hz, uint8_t pulse_count);
+esp_err_t tuss4470_send_burst(uint32_t frequency_hz, uint16_t cycles);
 esp_err_t tuss4470_receive_start(void);
+esp_err_t tuss4470_receive_stop(void);
 esp_err_t tuss4470_receive_wait(tuss4470_rx_capture_t *capture, uint32_t timeout_ms);

@@ -20,6 +20,8 @@ typedef struct {
     spi_device_handle_t spi_device;
 
     tuss4470_rmt_t rmt;
+    rmt_symbol_word_t tx_period;
+    bool tx_active;
 } tuss4470_t;
 
 
@@ -27,31 +29,33 @@ static const char *TAG = "TUSS4470";
 static tuss4470_t tuss4470;
 
 
-esp_err_t tuss4470_send_burst(uint32_t frequency_hz, uint8_t pulse_count){
-    uint16_t half_period_ticks = BURST_RMT_RESOLUTION_HZ / (2U * frequency_hz);
-
-    rmt_symbol_word_t period = {
-        .level0 = 0,
-        .duration0 = half_period_ticks,
-        .level1 = 1,
-        .duration1 = half_period_ticks,
-    };
-
-    rmt_transmit_config_t transmit_config = {
-        .loop_count = pulse_count,
-        .flags.eot_level = 1,
-    };
-
-    ESP_RETURN_ON_ERROR(gpio_set_level(tuss4470.config.io1_io_num, 0), TAG, "Failed to enable burst");
-
-    esp_err_t err = rmt_transmit(tuss4470.rmt.tx_channel, tuss4470.rmt.rmt_encoder, &period, sizeof(period), &transmit_config );
-
-    if (err == ESP_OK) {
-        err = rmt_tx_wait_all_done(tuss4470.rmt.tx_channel, 10);
+esp_err_t tuss4470_send_burst(uint32_t frequency_hz, uint16_t cycles)
+{
+    if (frequency_hz < TUSS4470_TX_MIN_HZ || frequency_hz > TUSS4470_TX_MAX_HZ || !cycles || cycles > TUSS4470_TX_MAX_CYCLES) {
+        return ESP_ERR_INVALID_ARG;
     }
-
-    gpio_set_level(tuss4470.config.io1_io_num, 1);
-    return err;
+    if (!tuss4470.rmt.tx_channel || tuss4470.tx_active) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    uint32_t half_period = (BURST_RMT_RESOLUTION_HZ + frequency_hz) / (2U * frequency_hz);
+    tuss4470.tx_period = (rmt_symbol_word_t){
+        .level0 = 0, .duration0 = half_period,
+        .level1 = 1, .duration1 = half_period,
+    };
+    rmt_transmit_config_t config = {.loop_count = cycles, .flags.eot_level = 1};
+    ESP_RETURN_ON_ERROR(gpio_set_level(tuss4470.config.io1_io_num, 0), TAG, "Failed to enable burst");
+    tuss4470.tx_active = true;
+    esp_err_t error = rmt_transmit(tuss4470.rmt.tx_channel, tuss4470.rmt.rmt_encoder, &tuss4470.tx_period, sizeof(tuss4470.tx_period), &config);
+    if (error == ESP_OK) {
+        error = rmt_tx_wait_all_done(tuss4470.rmt.tx_channel, 10);
+    }
+    esp_err_t released = gpio_set_level(tuss4470.config.io1_io_num, 1);
+    if (error != ESP_OK) {
+        ESP_RETURN_ON_ERROR(rmt_disable(tuss4470.rmt.tx_channel), TAG, "Failed to stop burst");
+        ESP_RETURN_ON_ERROR(rmt_enable(tuss4470.rmt.tx_channel), TAG, "Failed to reset burst channel");
+    }
+    tuss4470.tx_active = released != ESP_OK;
+    return released != ESP_OK ? released : error;
 }
 
 esp_err_t tuss4470_get_status(tuss4470_status_t *status)
@@ -144,6 +148,7 @@ esp_err_t tuss4470_wait_vdrv_ready(uint32_t timeout_ms)
         tuss4470_status_t status = {0};
 
         ESP_RETURN_ON_ERROR(tuss4470_get_status(&status), TAG, "Failed to read status");
+        ESP_RETURN_ON_FALSE(!tuss4470_has_fault(&status), ESP_FAIL, TAG, "Device fault: 0x%02X", status.raw);
 
         if (status.vdrv_ready) {
             return ESP_OK;
@@ -171,6 +176,13 @@ static esp_err_t tuss4470_set_out3(void) {
 esp_err_t tuss4470_receive_start(void){
     ESP_RETURN_ON_FALSE(tuss4470.spi_device != NULL, ESP_ERR_INVALID_STATE, TAG, "TUSS4470 not initialized");
     return tuss4470_rmt_receive_start(&tuss4470.rmt);
+}
+
+esp_err_t tuss4470_receive_stop(void)
+{
+    ESP_RETURN_ON_ERROR(rmt_disable(tuss4470.rmt.rx_channel), TAG, "Failed to stop RMT RX");
+    xQueueReset(tuss4470.rmt.rx_done_queue);
+    return rmt_enable(tuss4470.rmt.rx_channel);
 }
 
 esp_err_t tuss4470_receive_wait(tuss4470_rx_capture_t *capture, uint32_t timeout_ms){

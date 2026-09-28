@@ -2,13 +2,14 @@
 
 #include "driver/rmt_tx.h"
 #include "driver/rmt_rx.h"
+#include "tuss4470.h"
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
 
 #define BURST_RMT_RESOLUTION_HZ     20000000U
-#define RECEIVE_RMT_RESOLUTION_HZ   1000000U
+#define RECEIVE_RMT_RESOLUTION_HZ   TUSS4470_RX_CLOCK_HZ
 
 
 typedef struct {
@@ -16,7 +17,7 @@ typedef struct {
     rmt_channel_handle_t rx_channel;
     rmt_encoder_handle_t rmt_encoder;
     QueueHandle_t rx_done_queue;
-    rmt_symbol_word_t rx_symbols[512];
+    rmt_symbol_word_t rx_symbols[TUSS4470_RX_SYMBOL_CAPACITY];
 } tuss4470_rmt_t;
 
 
