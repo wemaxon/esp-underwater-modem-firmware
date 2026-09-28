@@ -1,4 +1,4 @@
-from app import Application
+from ultrasound_gui.ui.app import Application
 
 
 def main():
