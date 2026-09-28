@@ -1,18 +1,31 @@
 #include "capture.h"
 
-#include "esp_timer.h"
 #include "esp_log.h"
-#include "tuss4470.h"
+#include "esp_timer.h"
 
-static bool active;
-static bool faulted;
-static int64_t deadline;
-static capture_result_t result;
+#define CAPTURE_TIMEOUT_US      (2000 * 1000)
+#define CAPTURE_MIN_PULSE_NS    1000U
+#define CAPTURE_IDLE_NS         (20U * 1000 * 1000)
+
 static const char *TAG = "CAPTURE";
 
-uint32_t capture_clock_hz(void)
+static edge_capture_handle_t receiver;
+static bool active;
+static bool faulted;            /* a failed stop leaves the receiver in an unknown state */
+static int64_t deadline_us;
+static uint32_t edges[CAPTURE_EDGE_CAPACITY];
+static edge_trace_t trace = {.edges = edges, .edge_capacity = CAPTURE_EDGE_CAPACITY};
+
+esp_err_t capture_init(gpio_num_t out3_gpio)
 {
-    return TUSS4470_RX_CLOCK_HZ;
+    edge_capture_config_t config = {
+        .gpio = out3_gpio,
+        .resolution_hz = CAPTURE_CLOCK_HZ,
+        .symbol_capacity = CAPTURE_SYMBOL_CAPACITY,
+        .min_pulse_ns = CAPTURE_MIN_PULSE_NS,
+        .idle_timeout_ns = CAPTURE_IDLE_NS,
+    };
+    return edge_capture_new(&config, &receiver);
 }
 
 capture_status_t capture_start(void)
@@ -25,14 +38,14 @@ capture_status_t capture_start(void)
         ESP_LOGE(TAG, "Cannot arm OUT3: receiver stop previously failed");
         return CAPTURE_ERROR;
     }
-    esp_err_t error = tuss4470_receive_start();
+    esp_err_t error = edge_capture_start(receiver);
     if (error != ESP_OK) {
         ESP_LOGE(TAG, "Failed to arm OUT3: %s", esp_err_to_name(error));
         return CAPTURE_ERROR;
     }
     active = true;
-    deadline = esp_timer_get_time() + 2000000;
-    ESP_LOGI(TAG, "OUT3 armed; waiting for capture (2000 ms timeout)");
+    deadline_us = esp_timer_get_time() + CAPTURE_TIMEOUT_US;
+    ESP_LOGI(TAG, "OUT3 armed; waiting for capture (%d ms timeout)", CAPTURE_TIMEOUT_US / 1000);
     return CAPTURE_OK;
 }
 
@@ -41,78 +54,51 @@ capture_status_t capture_stop(void)
     if (!active && !faulted) {
         return CAPTURE_OK;
     }
-    esp_err_t error = tuss4470_receive_stop();
+    esp_err_t error = edge_capture_stop(receiver);
     faulted = error != ESP_OK;
     active = false;
     if (faulted) {
         ESP_LOGE(TAG, "Failed to stop OUT3: %s", esp_err_to_name(error));
-    } else {
-        ESP_LOGD(TAG, "OUT3 stopped");
-    }
-    return faulted ? CAPTURE_ERROR : CAPTURE_OK;
-}
-
-static capture_status_t convert(const tuss4470_rx_capture_t *raw)
-{
-    if (!raw->num_symbols) {
         return CAPTURE_ERROR;
     }
-    if (raw->num_symbols >= TUSS4470_RX_SYMBOL_CAPACITY) {
-        return CAPTURE_OVERFLOW;
-    }
-    result.duration_ticks = 0;
-    result.edge_count = 0;
-    bool level = false;
-    for (size_t segment = 0; segment < 2 * raw->num_symbols; ++segment) {
-        uint32_t symbol = raw->symbols[segment / 2].val;
-        unsigned shift = (segment % 2) * 16;
-        uint32_t ticks = (symbol >> shift) & 0x7fff;
-        bool next_level = (symbol >> (shift + 15)) & 1;
-        if (!ticks) {
-            break;
-        }
-        if (!result.duration_ticks) {
-            result.initial_high = next_level;
-        } else if (next_level != level) {
-            result.edges[result.edge_count++] = result.duration_ticks;
-        }
-        level = next_level;
-        result.duration_ticks += ticks;
-    }
-    return result.duration_ticks ? CAPTURE_OK : CAPTURE_ERROR;
+    ESP_LOGD(TAG, "OUT3 stopped");
+    return CAPTURE_OK;
 }
 
-capture_status_t capture_poll(const capture_result_t **output)
+static capture_status_t finish(edge_capture_result_t result, const edge_trace_t **output)
+{
+    active = false;
+    switch (result) {
+    case EDGE_CAPTURE_COMPLETE:
+        *output = &trace;
+        ESP_LOGI(TAG, "OUT3 complete: %u edges, %lu ticks at %u Hz", (unsigned)trace.edge_count,
+                 (unsigned long)trace.duration_ticks, CAPTURE_CLOCK_HZ);
+        return CAPTURE_OK;
+    case EDGE_CAPTURE_TRUNCATED:
+        ESP_LOGW(TAG, "OUT3 overflow: capacity %u symbols; capture discarded", CAPTURE_SYMBOL_CAPACITY);
+        return CAPTURE_OVERFLOW;
+    default:
+        ESP_LOGE(TAG, "Invalid OUT3 capture: no signal recorded");
+        return CAPTURE_ERROR;
+    }
+}
+
+capture_status_t capture_poll(const edge_trace_t **output)
 {
     *output = NULL;
     if (!active) {
         return CAPTURE_ERROR;
     }
-    tuss4470_rx_capture_t raw;
-    esp_err_t error = tuss4470_receive_wait(&raw, 0);
-    if (error == ESP_OK) {
-        active = false;
-        capture_status_t status = convert(&raw);
-        if (status == CAPTURE_OK) {
-            *output = &result;
-            ESP_LOGI(TAG, "OUT3 complete: %u symbols, %u edges, %lu ticks at %lu Hz", (unsigned)raw.num_symbols, result.edge_count, (unsigned long)result.duration_ticks, (unsigned long)capture_clock_hz());
-        } else if (status == CAPTURE_OVERFLOW) {
-            ESP_LOGW(TAG, "OUT3 overflow: %u symbols, capacity %u; capture discarded", (unsigned)raw.num_symbols, TUSS4470_RX_SYMBOL_CAPACITY);
-        } else {
-            ESP_LOGE(TAG, "Invalid OUT3 capture: %u symbols", (unsigned)raw.num_symbols);
-        }
-        return status;
+    edge_capture_result_t result = edge_capture_take(receiver, &trace);
+    if (result != EDGE_CAPTURE_PENDING) {
+        return finish(result, output);
     }
-    if (error == ESP_ERR_TIMEOUT && esp_timer_get_time() < deadline) {
+    if (esp_timer_get_time() < deadline_us) {
         return CAPTURE_PENDING;
     }
     if (capture_stop() != CAPTURE_OK) {
         return CAPTURE_ERROR;
     }
-    if (error == ESP_ERR_TIMEOUT) {
-        ESP_LOGW(TAG, "OUT3 timeout: no completed capture within 2000 ms");
-        return CAPTURE_TIMEOUT;
-    }
-    ESP_LOGE(TAG, "Failed to read OUT3: %s", esp_err_to_name(error));
-    return CAPTURE_ERROR;
+    ESP_LOGW(TAG, "OUT3 timeout: no completed capture within %d ms", CAPTURE_TIMEOUT_US / 1000);
+    return CAPTURE_TIMEOUT;
 }

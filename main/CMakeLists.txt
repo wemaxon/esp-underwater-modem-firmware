@@ -1,25 +1,22 @@
 idf_component_register(
-    SRCS 
+    SRCS
         "main.c"
-        "led.c"
-        "usb_transport.c"
-        "device_log.c"
+        "board.c"
+        "usb_interface.c"
+        "tf_protocol.c"
         "capture.c"
         "transmit.c"
-        "tf/tf_messages.c"
-        "tf/tf_protocol.c"
-        "../third_party/tinyframe/TinyFrame.c"
-    
+        "usb_transport.c"
+        "device_log.c"
+
     INCLUDE_DIRS
         "."
-        "include"
-
-    PRIV_INCLUDE_DIRS
-        "tf"
-        "../third_party/tinyframe"
 
     REQUIRES
         tuss4470
+        edge_capture
+        tinyframe
+        esp_driver_spi
         esp_driver_usb_serial_jtag
         esp_timer
 )

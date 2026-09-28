@@ -1,5 +1,7 @@
 #pragma once
 
+/* TinyFrame framing shared with the host (see README "USB interface protocol"). */
+
 #include <stdint.h>
 
 #define TF_ID_BYTES 2

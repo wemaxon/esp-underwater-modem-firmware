@@ -1,5 +1,7 @@
 #pragma once
 
+/* TUSS4470 register addresses and field masks (datasheet SLDS251A, section 7.6). */
+
 #include "esp_bit_defs.h"
 
 #define TUSS4470_REGISTER_BPF_CONFIG_1              0x10U
@@ -15,21 +17,6 @@
 #define TUSS4470_REGISTER_DEV_STAT                  0x1CU
 #define TUSS4470_REGISTER_DEVICE_ID                 0x1DU
 #define TUSS4470_REGISTER_REV_ID                    0x1EU
-
-#define TUSS4470_FRAME_READ                  BIT(15)
-#define TUSS4470_FRAME_ADDRESS_SHIFT         9U
-#define TUSS4470_FRAME_ADDRESS_MASK          0x3FU
-#define TUSS4470_FRAME_PARITY                BIT(8)
-
-#define TUSS4470_RESPONSE_CONTROLLER_PARITY  BIT(15)
-#define TUSS4470_RESPONSE_STATUS_SHIFT       9U
-#define TUSS4470_RESPONSE_STATUS_MASK        0x3FU
-
-#define TUSS4470_SPI_STATUS_VDRV_READY       BIT(5)
-#define TUSS4470_SPI_STATUS_PULSE_NUM_FLT    BIT(4)
-#define TUSS4470_SPI_STATUS_DRV_PULSE_FLT    BIT(3)
-#define TUSS4470_SPI_STATUS_EE_CRC_FLT       BIT(2)
-#define TUSS4470_SPI_STATUS_STATE_MASK       0x03U
 
 #define TUSS4470_BPF1_TRIM_FORCE             BIT(7)
 #define TUSS4470_BPF1_BYPASS                 BIT(6)

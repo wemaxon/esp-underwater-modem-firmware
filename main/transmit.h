@@ -14,4 +14,5 @@ typedef enum {
     TRANSMIT_ERROR,
 } transmit_status_t;
 
+/* Sends one tone burst and returns once it is complete. VDRV is powered only during the burst. */
 transmit_status_t transmit_send(const tone_burst_t *tone);

@@ -2,7 +2,7 @@ from dataclasses import replace
 import tkinter as tk
 from tkinter import ttk
 
-from ..devices import discover_devices, open_device
+from ..transport import discover_devices, open_device
 from ..session import AcquisitionState, ConnectionState, Session, SessionStatus
 from .controls import AcquisitionControls, ConnectionBar, TransmitControls
 from .plot import ScopePlot
@@ -124,24 +124,22 @@ class Application(tk.Tk):
         self.render_status(replace(self.status, transmitting=True, transmit_message="Transmitting"))
         self.session.transmit(tone)
 
+    def drain_session(self):
+        self.console.append(self.session.take_logs())
+        status = self.session.statuses.take()
+        if status is not None:
+            self.render_status(status)
+        frame = self.session.frames.take()
+        if frame is not None:
+            self.plot.show(frame)
+
     def poll(self):
         if self.session is not None:
-            self.console.append(self.session.take_logs())
-            status = self.session.statuses.take()
-            if status is not None:
-                self.render_status(status)
-            frame = self.session.frames.take()
-            if frame is not None:
-                self.plot.show(frame)
-            if self.session.done.is_set():
+            finished = self.session.done.is_set()
+            self.drain_session()
+            if finished:
                 self.session.thread.join()
-                self.console.append(self.session.take_logs())
-                status = self.session.statuses.take()
-                if status is not None:
-                    self.render_status(status)
-                frame = self.session.frames.take()
-                if frame is not None:
-                    self.plot.show(frame)
+                self.drain_session()
                 self.session = None
         if self.closing and self.session is None:
             self.after_idle(self.destroy)
