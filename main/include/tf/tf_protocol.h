@@ -5,13 +5,14 @@
 #include "capture.h"
 #include "transmit.h"
 
-enum { TF_USB_PROTOCOL_VERSION = 4 };
+enum { TF_USB_PROTOCOL_VERSION = 5 };
 
 typedef enum {
     TF_USB_MSG_GET_DEVICE_INFO = 1,
     TF_USB_MSG_CAPTURE = 2,
     TF_USB_MSG_STOP = 3,
     TF_USB_MSG_TRANSMIT = 4,
+    TF_USB_MSG_LOG = 5,
 } tf_usb_message_t;
 
 typedef enum {

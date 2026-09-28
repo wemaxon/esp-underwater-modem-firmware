@@ -1,6 +1,7 @@
 #include "driver/spi_master.h"
 
 #include "board.h"
+#include "device_log.h"
 #include "tf/tf_messages.h"
 #include "usb_transport.h"
 #include "esp_timer.h"
@@ -8,6 +9,7 @@
 
 void app_main(void)
 {
+    ESP_ERROR_CHECK(device_log_init());
     spi_bus_config_t bus = {
         .miso_io_num = PIN_TUSS4470_SDO,
         .mosi_io_num = PIN_TUSS4470_SDI,

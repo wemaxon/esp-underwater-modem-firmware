@@ -3,6 +3,7 @@ idf_component_register(
         "main.c"
         "led.c"
         "usb_transport.c"
+        "device_log.c"
         "capture.c"
         "transmit.c"
         "tf/tf_messages.c"

@@ -35,3 +35,8 @@ bool usb_transport_connected(void)
 {
     return usb_serial_jtag_is_connected();
 }
+
+bool usb_transport_try_write(const uint8_t *data, size_t length)
+{
+    return usb_serial_jtag_write_bytes(data, length, 0) == (int)length;
+}

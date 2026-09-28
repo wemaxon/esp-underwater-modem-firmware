@@ -2,6 +2,7 @@
 
 #include "TinyFrame.h"
 #include "capture.h"
+#include "device_log.h"
 #include "tf/tf_protocol.h"
 #include "usb_transport.h"
 
@@ -9,10 +10,18 @@ static TinyFrame framing;
 static bool request_pending;
 static bool write_failed;
 static TF_ID capture_id;
+static bool logs_enabled;
+static bool sending_log;
+
+_Static_assert(TF_SENDBUF_LEN >= DEVICE_LOG_TEXT_CAPACITY - 1 + 14, "Log frames must fit in one transport write");
 
 void TF_WriteImpl(TinyFrame *tf, const uint8_t *data, uint32_t length)
 {
     (void)tf;
+    if (sending_log) {
+        usb_transport_try_write(data, length);
+        return;
+    }
     if (!write_failed && usb_transport_write(data, length) != ESP_OK) {
         write_failed = true;
     }
@@ -70,6 +79,7 @@ static TF_Result command(TinyFrame *tf, TF_Msg *message)
     } else if (message->type == TF_USB_MSG_GET_DEVICE_INFO) {
         tf_payload_t payload = tf_protocol_device_info("ESP32-C3 / TUSS4470", capture_clock_hz(), CAPTURE_OUT3_EDGE_CAPACITY);
         respond(message->type, message->frame_id, payload.data, payload.length);
+        logs_enabled = !write_failed;
         return TF_STAY;
     } else if (message->type == TF_USB_MSG_CAPTURE) {
         capture_status_t status = capture_start();
@@ -109,7 +119,7 @@ void tf_messages_tick(void)
     TF_Tick(&framing);
 }
 
-void tf_messages_poll(void)
+static void poll_capture(void)
 {
     if (!request_pending || write_failed) {
         return;
@@ -129,10 +139,24 @@ void tf_messages_poll(void)
     }
 }
 
+void tf_messages_poll(void)
+{
+    poll_capture();
+    if (logs_enabled && !write_failed) {
+        device_log_entry_t entry;
+        if (device_log_read(&entry)) {
+            sending_log = true;
+            TF_SendSimple(&framing, TF_USB_MSG_LOG, (const uint8_t *)entry.text, entry.length);
+            sending_log = false;
+        }
+    }
+}
+
 void tf_messages_reset(void)
 {
     capture_stop();
     request_pending = false;
+    logs_enabled = false;
     TF_ResetParser(&framing);
     write_failed = false;
 }
