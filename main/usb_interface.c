@@ -2,12 +2,12 @@
 
 #include "TinyFrame.h"
 #include "acquisition.h"
-#include "afe.h"
 #include "edge_capture.h"
 #include "device_log.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "tf_protocol.h"
+#include "tuss_config.h"
 #include "transmit.h"
 #include "usb_transport.h"
 
@@ -27,7 +27,7 @@ static const char *TAG = "USB_INTERFACE";
 
 _Static_assert(PAYLOAD_SIZE >= TF_PROTOCOL_VOUT_SIZE(ACQUISITION_VOUT_BLOCK), "Payload must hold a VOUT block");
 _Static_assert(EDGE_BATCH >= EDGE_CAPTURE_READ_MIN_EDGES, "Edge batch too small for one read");
-_Static_assert(TF_PROTOCOL_AFE_SIZE == AFE_REGISTER_COUNT, "Protocol and AFE register block must match");
+_Static_assert(TF_PROTOCOL_CONFIG_SIZE == TUSS_CONFIG_REGISTER_COUNT, "Protocol and configuration register block must match");
 
 static TinyFrame framing;       /* requests, responses and stream data; data uses frame IDs 0x8000-0xFFFF */
 static TinyFrame log_framing;   /* device log events, frame IDs 0x8000-0xFFFF */
@@ -114,31 +114,27 @@ static void stop_stream(const TF_Msg *request)
     respond_result(request->type, request->frame_id, stop_streaming());
 }
 
-static void respond_afe(const TF_Msg *request, esp_err_t error, const uint8_t *values)
+static void respond_config(const TF_Msg *request, esp_err_t error, const uint8_t *values)
 {
     tf_protocol_result_t result = error == ESP_OK ? TF_PROTOCOL_RESULT_OK : TF_PROTOCOL_RESULT_DEVICE_ERROR;
-    respond_payload(request->type, request->frame_id, tf_protocol_encode_afe(result, values, payload, sizeof(payload)));
+    respond_payload(request->type, request->frame_id, tf_protocol_encode_config(result, values, payload, sizeof(payload)));
 }
 
-static void get_afe_config(const TF_Msg *request)
+static void get_config(const TF_Msg *request)
 {
-    uint8_t values[AFE_REGISTER_COUNT];
-    esp_err_t error = afe_read(values);
+    uint8_t values[TUSS_CONFIG_REGISTER_COUNT];
+    esp_err_t error = tuss_config_read(values);
     if (error == ESP_OK) {
-        afe_log("Read", values);
+        tuss_config_log("Read", values);
     }
-    respond_afe(request, error, values);
+    respond_config(request, error, values);
 }
 
 /* Responds with the configuration read back after writing. */
-static void set_afe_config(const TF_Msg *request)
+static void set_config(const TF_Msg *request)
 {
-    uint8_t values[AFE_REGISTER_COUNT];
-    esp_err_t error = afe_write(request->data);
-    if (error == ESP_OK) {
-        error = afe_read(values);
-    }
-    respond_afe(request, error, values);
+    uint8_t values[TUSS_CONFIG_REGISTER_COUNT];
+    respond_config(request, tuss_config_write(request->data, values), values);
 }
 
 static void transmit(const TF_Msg *request)
@@ -158,8 +154,8 @@ static const command_t commands[] = {
     {TF_PROTOCOL_MSG_STREAM_START, 0, start_stream},
     {TF_PROTOCOL_MSG_STREAM_STOP, 0, stop_stream},
     {TF_PROTOCOL_MSG_TRANSMIT, TF_PROTOCOL_TONE_SIZE, transmit},
-    {TF_PROTOCOL_MSG_GET_AFE_CONFIG, 0, get_afe_config},
-    {TF_PROTOCOL_MSG_SET_AFE_CONFIG, TF_PROTOCOL_AFE_SIZE, set_afe_config},
+    {TF_PROTOCOL_MSG_GET_CONFIG, 0, get_config},
+    {TF_PROTOCOL_MSG_SET_CONFIG, TF_PROTOCOL_CONFIG_SIZE, set_config},
 };
 
 static TF_Result on_request(TinyFrame *tf, TF_Msg *request)

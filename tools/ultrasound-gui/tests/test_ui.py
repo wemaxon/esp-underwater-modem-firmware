@@ -36,15 +36,18 @@ class ApplicationTests(unittest.TestCase):
         wait_until(lambda: self.pump() or self.app.status.acquisition == AcquisitionState.STOPPED)
         self.assertIn("Device connected", self.app.console.text.get("1.0", "end"))
 
-    def test_receiver_panel_applies_edits(self):
+    def test_configuration_panel_applies_edits(self):
         self.app.connect()
-        wait_until(lambda: self.pump() or self.app.receiver.device_config is not None)
-        hysteresis = self.app.receiver.choices[-1]
-        self.assertEqual(hysteresis.get(), "230 mV")
-        hysteresis.current(7)
-        self.app.apply_receiver()
-        wait_until(lambda: self.pump() or self.app.receiver.device_config.registers[5] & 0x07 == 7)
-        self.assertEqual(hysteresis.get(), "380 mV")
+        wait_until(lambda: self.pump() or self.app.configuration.device_config is not None)
+        choices = {setting.label: choice for setting, choice in self.app.configuration.choices.items()}
+        self.assertEqual(choices["Zero-crossing hysteresis"].get(), "230 mV")
+        self.assertEqual(choices["VDRV voltage"].get(), "5 V")
+        choices["Zero-crossing hysteresis"].current(7)
+        choices["Output stage"].current(1)
+        self.app.apply_configuration()
+        wait_until(lambda: self.pump() or self.app.configuration.device_config.registers[7] == 0x80)
+        self.assertEqual(choices["Zero-crossing hysteresis"].get(), "380 mV")
+        self.assertEqual(choices["Output stage"].get(), "Half bridge")
 
     def test_single_shot_holds_the_triggered_window(self):
         self.app.connect()

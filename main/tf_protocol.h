@@ -13,7 +13,7 @@
 #include "edge_decoder.h"
 #include "transmit.h"
 
-#define TF_PROTOCOL_VERSION 7
+#define TF_PROTOCOL_VERSION 8
 
 typedef enum {
     TF_PROTOCOL_MSG_GET_DEVICE_INFO = 1,
@@ -24,8 +24,8 @@ typedef enum {
     TF_PROTOCOL_MSG_VOUT_SAMPLES = 6,   /* device event */
     TF_PROTOCOL_MSG_OUT3_EDGES = 7,     /* device event */
     TF_PROTOCOL_MSG_STREAM_END = 8,     /* device event */
-    TF_PROTOCOL_MSG_GET_AFE_CONFIG = 9,
-    TF_PROTOCOL_MSG_SET_AFE_CONFIG = 10,
+    TF_PROTOCOL_MSG_GET_CONFIG = 9,
+    TF_PROTOCOL_MSG_SET_CONFIG = 10,
 } tf_protocol_message_t;
 
 typedef enum {
@@ -38,7 +38,7 @@ typedef enum {
 
 #define TF_PROTOCOL_LOG_MAX_LENGTH       255U
 #define TF_PROTOCOL_TONE_SIZE            6U
-#define TF_PROTOCOL_AFE_SIZE             6U      /* AFE register values */
+#define TF_PROTOCOL_CONFIG_SIZE          8U      /* TUSS4470 configuration register values */
 #define TF_PROTOCOL_VOUT_SIZE(samples)   (10U + 2U * (samples))
 #define TF_PROTOCOL_EDGES_SIZE(edges)    (11U + 2U * ((edges) - 1U))
 
@@ -50,8 +50,8 @@ typedef struct {
 
 /* Encoders return the payload length, or 0 if the input is invalid or does not fit. */
 size_t tf_protocol_encode_device_info(const tf_protocol_device_info_t *info, uint8_t *out, size_t capacity);
-/* Result, followed by the AFE register values if the result is OK. */
-size_t tf_protocol_encode_afe(tf_protocol_result_t result, const uint8_t *values, uint8_t *out, size_t capacity);
+/* Result, followed by the configuration register values if the result is OK. */
+size_t tf_protocol_encode_config(tf_protocol_result_t result, const uint8_t *values, uint8_t *out, size_t capacity);
 size_t tf_protocol_encode_vout(int64_t first_sample_ns, const uint16_t *millivolts, size_t count, uint8_t *out, size_t capacity);
 
 /*

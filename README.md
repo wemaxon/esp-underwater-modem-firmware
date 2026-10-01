@@ -20,7 +20,7 @@ callbacks only buffer RMT and ADC data, which the loop forwards to the host.
 | `main/usb_interface.*` | USB interface to the host: command table, responses, stream and log forwarding |
 | `main/tf_protocol.*` | Payload encoding and decoding for the USB interface |
 | `main/acquisition.*` | VOUT sampling (ADC, divider-corrected) and OUT3 edges on one time base |
-| `main/afe.*` | TUSS4470 receive front-end registers: read, write and log as one block |
+| `main/tuss_config.*` | TUSS4470 receiver and transmitter registers: read, write and log as one block |
 | `main/transmit.*` | Tone burst with VDRV powered only for its duration |
 | `main/usb_transport.*`, `main/device_log.*` | USB byte transport; ESP log capture |
 
@@ -70,7 +70,7 @@ stream. Times in a held capture are relative to the trigger.
 The development interface between the firmware and the GUI over USB, not the
 acoustic modem protocol.
 
-Protocol version: **7**. TinyFrame uses SOF `0x01`, 16-bit frame IDs, 16-bit
+Protocol version: **8**. TinyFrame uses SOF `0x01`, 16-bit frame IDs, 16-bit
 payload lengths, 8-bit message types and CRC32. Payload integers are little endian.
 Host request IDs use `0x0000` through `0x7FFF`; every response echoes its
 request's type and frame ID. Device events use frame IDs `0x8000` through
@@ -86,8 +86,8 @@ request's type and frame ID. Device events use frame IDs `0x8000` through
 | VOUT_SAMPLES | `0x06` | Device event | See below |
 | OUT3_EDGES | `0x07` | Device event | See below |
 | STREAM_END | `0x08` | Device event | `uint8 result`: why the device ended the stream |
-| GET_AFE_CONFIG | `0x09` | Empty | `uint8 result`, then the AFE registers if OK |
-| SET_AFE_CONFIG | `0x0A` | AFE registers | `uint8 result`, then the AFE registers read back if OK |
+| GET_CONFIG | `0x09` | Empty | `uint8 result`, then the configuration registers if OK |
+| SET_CONFIG | `0x0A` | Configuration registers | `uint8 result`, then the registers read back if OK |
 
 While streaming, the device sends VOUT_SAMPLES and OUT3_EDGES as data becomes
 available. All stream times are nanoseconds since STREAM_START on the device
@@ -104,15 +104,22 @@ frequency is rounded to the nearest half-period of the 20 MHz burst clock. The
 host waits for the response before sending another transmission. Transmitting
 does not interrupt streaming.
 
-### AFE_CONFIG
+### CONFIG
 
-The TUSS4470 receive front-end registers, one byte each, in this order:
+The TUSS4470 receiver and transmitter registers, one byte each, in this order:
 `BPF_CONFIG_1` (0x10), `BPF_CONFIG_2` (0x11), `DEV_CTRL_1` (0x12),
-`DEV_CTRL_2` (0x13), `ECHO_INT_CONFIG` (0x17), `ZC_CONFIG` (0x18). SET writes
-all six, verifying each by read-back, and responds with the values read back.
-The device logs the configuration at startup, on every read and after every
-write. Field meanings are those of the datasheet; the GUI's Receiver tab edits
-them by name.
+`DEV_CTRL_2` (0x13), `ECHO_INT_CONFIG` (0x17), `ZC_CONFIG` (0x18),
+`VDRV_CTRL` (0x16), `BURST_PULSE` (0x1A). SET writes them, verifying each by
+read-back, and responds with the values read back. The device logs the
+configuration at startup, on every read and after every write.
+
+The firmware keeps the bits it relies on, whatever SET requests: reserved
+bits, `VOUT_SCALE_SEL` (VOUT maps to 3.3 V), `ZC_CMP_EN` (OUT3 is captured),
+`VDRV_HI_Z` and `DIS_VDRV_REG_LSTN` (VDRV is switched on only for bursts),
+`PRE_DRIVER_MODE` and the `BURST_PULSE` count (bursts are timed on IO2). Field
+meanings are those of the datasheet; the GUI's Configuration tab edits them by
+name. The VDRV voltage must stay below VPWR - 0.1 V, or VDRV never becomes
+ready and TRANSMIT times out.
 
 ### VOUT_SAMPLES
 

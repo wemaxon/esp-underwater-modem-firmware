@@ -2,7 +2,7 @@ from struct import pack
 import unittest
 
 from support import wait_until
-from ultrasound_gui.afe import SETTINGS
+from ultrasound_gui.tuss_config import RECEIVER_SETTINGS, TRANSMITTER_SETTINGS
 from ultrasound_gui.model import EdgeBlock, ToneBurst, VoutBlock
 from ultrasound_gui.session import AcquisitionState, ConnectionState, Session
 from ultrasound_gui.simulator import SimulatedDevice
@@ -61,14 +61,16 @@ class SessionTests(unittest.TestCase):
         wait_until(lambda: session.logs.qsize() > 0)
         self.assertIn("Device connected", "".join(session.take_logs()))
 
-    def test_reads_and_applies_the_receiver_configuration(self):
+    def test_reads_and_applies_the_configuration(self):
         device = SimulatedDevice()
         session = self.connect(device)
-        wait_until(lambda: session.status.afe is not None)
-        hysteresis = next(setting for setting in SETTINGS if setting.label == "Zero-crossing hysteresis")
-        session.apply_afe(session.status.afe.with_value(hysteresis, 7))
-        wait_until(lambda: session.status.afe.get(hysteresis) == 7)
-        self.assertEqual(device.afe_registers[5] & 0x07, 7)
+        wait_until(lambda: session.status.config is not None)
+        hysteresis = next(setting for setting in RECEIVER_SETTINGS if setting.label == "Zero-crossing hysteresis")
+        voltage = next(setting for setting in TRANSMITTER_SETTINGS if setting.label == "VDRV voltage")
+        session.apply_config(session.status.config.with_value(hysteresis, 7).with_value(voltage, 3))
+        wait_until(lambda: session.status.config.get(hysteresis) == 7)
+        self.assertEqual(session.status.config.get(voltage), 3)
+        self.assertEqual(device.config_registers[5] & 0x07, 7)
         self.assertEqual(session.status.error, "")
 
     def test_stream_delivers_vout_and_out3_until_stopped(self):

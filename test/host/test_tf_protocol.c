@@ -27,7 +27,7 @@ static void encodes_device_info(void)
 {
     uint8_t out[32];
     tf_protocol_device_info_t info = {.name = "Dev", .vout_rate_hz = 20000, .edge_clock_hz = 10000000};
-    const uint8_t expected[] = {7, 0x20, 0x4E, 0, 0, 0x80, 0x96, 0x98, 0, 'D', 'e', 'v'};
+    const uint8_t expected[] = {8, 0x20, 0x4E, 0, 0, 0x80, 0x96, 0x98, 0, 'D', 'e', 'v'};
     CHECK(tf_protocol_encode_device_info(&info, out, sizeof(out)) == sizeof(expected));
     CHECK(memcmp(out, expected, sizeof(expected)) == 0);
     CHECK(tf_protocol_encode_device_info(&info, out, sizeof(expected) - 1) == 0);
@@ -72,15 +72,15 @@ static void starts_a_new_run_where_edges_cannot_continue(void)
     CHECK(tf_protocol_encode_edges(sample_edges, 3, 100, out, TF_PROTOCOL_EDGES_SIZE(1) - 1, &encoded) == 0 && encoded == 0);
 }
 
-static void encodes_afe_config(void)
+static void encodes_config(void)
 {
-    const uint8_t values[TF_PROTOCOL_AFE_SIZE] = {0x00, 0x10, 0x00, 0x02, 0x17, 0x94};
-    const uint8_t expected[] = {0, 0x00, 0x10, 0x00, 0x02, 0x17, 0x94};
-    uint8_t out[8];
-    CHECK(tf_protocol_encode_afe(TF_PROTOCOL_RESULT_OK, values, out, sizeof(out)) == sizeof(expected));
+    const uint8_t values[TF_PROTOCOL_CONFIG_SIZE] = {0x00, 0x10, 0x00, 0x02, 0x17, 0x94, 0x20, 0x80};
+    const uint8_t expected[] = {0, 0x00, 0x10, 0x00, 0x02, 0x17, 0x94, 0x20, 0x80};
+    uint8_t out[10];
+    CHECK(tf_protocol_encode_config(TF_PROTOCOL_RESULT_OK, values, out, sizeof(out)) == sizeof(expected));
     CHECK(memcmp(out, expected, sizeof(expected)) == 0);
-    CHECK(tf_protocol_encode_afe(TF_PROTOCOL_RESULT_DEVICE_ERROR, values, out, sizeof(out)) == 1 && out[0] == TF_PROTOCOL_RESULT_DEVICE_ERROR);
-    CHECK(tf_protocol_encode_afe(TF_PROTOCOL_RESULT_OK, values, out, sizeof(expected) - 1) == 0);
+    CHECK(tf_protocol_encode_config(TF_PROTOCOL_RESULT_DEVICE_ERROR, values, out, sizeof(out)) == 1 && out[0] == TF_PROTOCOL_RESULT_DEVICE_ERROR);
+    CHECK(tf_protocol_encode_config(TF_PROTOCOL_RESULT_OK, values, out, sizeof(expected) - 1) == 0);
 }
 
 static void decodes_tone(void)
@@ -138,7 +138,7 @@ int main(int argc, char **argv)
     }
     encodes_device_info();
     encodes_vout();
-    encodes_afe_config();
+    encodes_config();
     encodes_edges_as_tick_intervals();
     starts_a_new_run_where_edges_cannot_continue();
     decodes_tone();

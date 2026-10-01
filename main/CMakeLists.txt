@@ -5,7 +5,7 @@ idf_component_register(
         "usb_interface.c"
         "tf_protocol.c"
         "acquisition.c"
-        "afe.c"
+        "tuss_config.c"
         "transmit.c"
         "usb_transport.c"
         "device_log.c"

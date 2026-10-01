@@ -3,9 +3,9 @@ from math import isfinite
 import tkinter as tk
 from tkinter import ttk
 
-from ..afe import SETTINGS, AfeConfig
 from ..model import ToneBurst
 from ..session import AcquisitionState, ConnectionState, SessionStatus
+from ..tuss_config import RECEIVER_SETTINGS, TRANSMITTER_SETTINGS
 
 
 class ConnectionBar(ttk.Frame):
@@ -120,36 +120,43 @@ class AcquisitionControls(ttk.LabelFrame):
         self.force_button.configure(state="normal" if ready and running and armed else "disabled")
 
 
-class ReceiverControls(ttk.LabelFrame):
-    """TUSS4470 receive front-end settings. Shows the device's configuration; Apply sends the edits."""
+class ConfigurationControls(ttk.Frame):
+    """TUSS4470 receiver and transmitter settings. Shows the device's configuration; Apply sends the edits."""
+
+    GROUPS = (("Receiver", RECEIVER_SETTINGS), ("Transmitter", TRANSMITTER_SETTINGS))
 
     def __init__(self, master, apply):
-        super().__init__(master, text="Receiver", padding=12)
-        self.columnconfigure(1, weight=1)
+        super().__init__(master)
+        self.columnconfigure(0, weight=1)
         self.device_config = None
-        self.choices = []
-        for row, setting in enumerate(SETTINGS):
-            ttk.Label(self, text=setting.label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=2)
-            choice = ttk.Combobox(self, values=setting.choices, state="disabled", width=12)
-            choice.grid(row=row, column=1, sticky="ew", pady=2)
-            self.choices.append(choice)
+        self.choices = {}
+        for row, (title, settings) in enumerate(self.GROUPS):
+            group = ttk.LabelFrame(self, text=title, padding=12)
+            group.grid(row=row, column=0, sticky="ew", pady=(0, 12))
+            group.columnconfigure(1, weight=1)
+            for index, setting in enumerate(settings):
+                ttk.Label(group, text=setting.label).grid(row=index, column=0, sticky="w", padx=(0, 8), pady=2)
+                choice = ttk.Combobox(group, values=setting.choices, state="disabled", width=12)
+                choice.grid(row=index, column=1, sticky="ew", pady=2)
+                self.choices[setting] = choice
+        ttk.Label(self, text="VDRV must stay below VPWR - 0.1 V.", foreground="#666").grid(row=len(self.GROUPS), column=0, sticky="w")
         self.apply_button = ttk.Button(self, text="Apply", command=apply)
-        self.apply_button.grid(row=len(SETTINGS), column=0, columnspan=2, sticky="ew", pady=(8, 0))
+        self.apply_button.grid(row=len(self.GROUPS) + 1, column=0, sticky="ew", pady=(8, 0))
 
     def edited_config(self):
         config = self.device_config
-        for setting, choice in zip(SETTINGS, self.choices):
+        for setting, choice in self.choices.items():
             if choice.current() >= 0:
                 config = config.with_value(setting, choice.current())
         return config
 
     def set_status(self, status: SessionStatus):
-        ready = status.connection == ConnectionState.CONNECTED and status.afe is not None
-        if status.afe is not None and status.afe != self.device_config:
-            self.device_config = status.afe
-            for setting, choice in zip(SETTINGS, self.choices):
+        ready = status.connection == ConnectionState.CONNECTED and status.config is not None
+        if status.config is not None and status.config != self.device_config:
+            self.device_config = status.config
+            for setting, choice in self.choices.items():
                 choice.set(setting.text(self.device_config.get(setting)))
-        for choice in self.choices:
+        for choice in self.choices.values():
             choice.configure(state="readonly" if ready else "disabled")
         self.apply_button.configure(state="normal" if ready else "disabled")
 

@@ -8,12 +8,12 @@ from time import monotonic
 import numpy as np
 
 from ._vendor.ponyframe.TinyFrame import TF, TinyFrame
-from .afe import REGISTERS, AfeConfig
+from .tuss_config import REGISTERS, TussConfig
 from .model import DeviceInfo, EdgeBlock, VoutBlock
 
-VERSION = 7
+VERSION = 8
 (GET_DEVICE_INFO, STREAM_START, STREAM_STOP, TRANSMIT, LOG, VOUT_SAMPLES, OUT3_EDGES, STREAM_END,
- GET_AFE_CONFIG, SET_AFE_CONFIG) = range(1, 11)
+ GET_CONFIG, SET_CONFIG) = range(1, 11)
 EVENTS = frozenset((LOG, VOUT_SAMPLES, OUT3_EDGES, STREAM_END))
 DEVICE_FRAME_ID = 0x8000        # set in the frame ID of every device event
 OK, INVALID_REQUEST, TIMEOUT, OVERFLOW, DEVICE_ERROR = range(5)
@@ -89,16 +89,16 @@ def decode_result(payload):
     return payload[0]
 
 
-def decode_afe(payload):
-    """Result and, if it is OK, the device's AFE configuration."""
+def decode_config(payload):
+    """Result and, if it is OK, the device's TUSS4470 configuration."""
     result = decode_result(payload[:1])
     if result != OK:
         if len(payload) != 1:
-            raise ProtocolError("Invalid AFE configuration response")
+            raise ProtocolError("Invalid configuration response")
         return result, None
     if len(payload) != 1 + len(REGISTERS):
-        raise ProtocolError("Invalid AFE configuration")
-    return result, AfeConfig(tuple(payload[1:]))
+        raise ProtocolError("Invalid configuration")
+    return result, TussConfig(tuple(payload[1:]))
 
 
 def decode_log(payload):
