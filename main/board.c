@@ -1,6 +1,7 @@
 #include "board.h"
 
 #include "driver/spi_master.h"
+#include "afe.h"
 #include "esp_check.h"
 #include "tuss4470.h"
 
@@ -35,5 +36,8 @@ esp_err_t board_init(void)
     ESP_RETURN_ON_ERROR(tuss4470_init(&config), TAG, "TUSS4470 initialization failed");
     ESP_RETURN_ON_ERROR(tuss4470_update_register(TUSS4470_REGISTER_ZC_CONFIG, TUSS4470_ZC_ENABLE, TUSS4470_ZC_ENABLE),
                         TAG, "Failed to enable OUT3 zero-crossing output");
+    uint8_t afe[AFE_REGISTER_COUNT];
+    ESP_RETURN_ON_ERROR(afe_read(afe), TAG, "Failed to read AFE configuration");
+    afe_log("Startup", afe);
     return ESP_OK;
 }

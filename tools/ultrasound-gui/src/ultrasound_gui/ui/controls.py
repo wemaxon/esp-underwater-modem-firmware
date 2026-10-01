@@ -3,6 +3,7 @@ from math import isfinite
 import tkinter as tk
 from tkinter import ttk
 
+from ..afe import SETTINGS, AfeConfig
 from ..model import ToneBurst
 from ..session import AcquisitionState, ConnectionState, SessionStatus
 
@@ -70,9 +71,9 @@ class AcquisitionControls(ttk.LabelFrame):
         self.pre_trigger_ms = tk.StringVar(value="10")
         self.trigger_v = tk.StringVar(value="1.0")
         self.state_text = tk.StringVar(value="Stopped")
-        ttk.Label(self, textvariable=self.state_text).grid(row=0, column=0, sticky="w", pady=(0, 12))
+        ttk.Label(self, textvariable=self.state_text).grid(row=0, column=0, sticky="w", pady=(0, 8))
         self.mode_input = ttk.Combobox(self, textvariable=self.mode, values=self.MODES, state="readonly", width=18)
-        self.mode_input.grid(row=1, column=0, sticky="ew", pady=(0, 12))
+        self.mode_input.grid(row=1, column=0, sticky="ew", pady=(0, 8))
         self.mode_input.bind("<<ComboboxSelected>>", lambda event: view_changed())
         self.window_input = self._spinbox("Window (ms)", self.window_ms, 1, self.MAX_WINDOW_MS, 10, view_changed, row=2)
         self.pre_trigger_input = self._spinbox("Pre-trigger (ms)", self.pre_trigger_ms, 0, self.MAX_WINDOW_MS, 1, view_changed, row=4)
@@ -87,7 +88,7 @@ class AcquisitionControls(ttk.LabelFrame):
     def _spinbox(self, label, variable, low, high, increment, changed, row):
         ttk.Label(self, text=label).grid(row=row, column=0, sticky="w")
         spinbox = ttk.Spinbox(self, textvariable=variable, from_=low, to=high, increment=increment, command=changed, width=18)
-        spinbox.grid(row=row + 1, column=0, sticky="ew", pady=(4, 12))
+        spinbox.grid(row=row + 1, column=0, sticky="ew", pady=(2, 8))
         spinbox.bind("<Return>", lambda event: changed())
         spinbox.bind("<FocusOut>", lambda event: changed())
         return spinbox
@@ -119,6 +120,40 @@ class AcquisitionControls(ttk.LabelFrame):
         self.force_button.configure(state="normal" if ready and running and armed else "disabled")
 
 
+class ReceiverControls(ttk.LabelFrame):
+    """TUSS4470 receive front-end settings. Shows the device's configuration; Apply sends the edits."""
+
+    def __init__(self, master, apply):
+        super().__init__(master, text="Receiver", padding=12)
+        self.columnconfigure(1, weight=1)
+        self.device_config = None
+        self.choices = []
+        for row, setting in enumerate(SETTINGS):
+            ttk.Label(self, text=setting.label).grid(row=row, column=0, sticky="w", padx=(0, 8), pady=2)
+            choice = ttk.Combobox(self, values=setting.choices, state="disabled", width=12)
+            choice.grid(row=row, column=1, sticky="ew", pady=2)
+            self.choices.append(choice)
+        self.apply_button = ttk.Button(self, text="Apply", command=apply)
+        self.apply_button.grid(row=len(SETTINGS), column=0, columnspan=2, sticky="ew", pady=(8, 0))
+
+    def edited_config(self):
+        config = self.device_config
+        for setting, choice in zip(SETTINGS, self.choices):
+            if choice.current() >= 0:
+                config = config.with_value(setting, choice.current())
+        return config
+
+    def set_status(self, status: SessionStatus):
+        ready = status.connection == ConnectionState.CONNECTED and status.afe is not None
+        if status.afe is not None and status.afe != self.device_config:
+            self.device_config = status.afe
+            for setting, choice in zip(SETTINGS, self.choices):
+                choice.set(setting.text(self.device_config.get(setting)))
+        for choice in self.choices:
+            choice.configure(state="readonly" if ready else "disabled")
+        self.apply_button.configure(state="normal" if ready else "disabled")
+
+
 class TransmitControls(ttk.LabelFrame):
     def __init__(self, master, transmit):
         super().__init__(master, text="Tone burst", padding=12)
@@ -128,10 +163,10 @@ class TransmitControls(ttk.LabelFrame):
         self.state_text = tk.StringVar(value="Idle")
         ttk.Label(self, text="Frequency (Hz)").grid(row=0, column=0, sticky="w")
         self.frequency_input = ttk.Spinbox(self, textvariable=self.frequency_hz, from_=40000, to=1000000, increment=1000, width=18)
-        self.frequency_input.grid(row=1, column=0, sticky="ew", pady=(4, 12))
+        self.frequency_input.grid(row=1, column=0, sticky="ew", pady=(2, 8))
         ttk.Label(self, text="Cycles").grid(row=2, column=0, sticky="w")
         self.cycles_input = ttk.Spinbox(self, textvariable=self.cycles, from_=1, to=255, increment=1, width=18)
-        self.cycles_input.grid(row=3, column=0, sticky="ew", pady=(4, 12))
+        self.cycles_input.grid(row=3, column=0, sticky="ew", pady=(2, 8))
         self.transmit_button = ttk.Button(self, text="Transmit", command=transmit)
         self.transmit_button.grid(row=4, column=0, sticky="ew")
         ttk.Label(self, textvariable=self.state_text, wraplength=180).grid(row=5, column=0, sticky="w", pady=(8, 0))

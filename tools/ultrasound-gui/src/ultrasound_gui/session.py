@@ -11,11 +11,12 @@ from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
 from time import monotonic
 
+from .afe import AfeConfig
 from .model import ToneBurst
 from .tf_protocol import (
-    DEVICE_FRAME_ID, EVENTS, GET_DEVICE_INFO, LOG, OK, OUT3_EDGES, RESULT_NAMES, STREAM_END, STREAM_START,
-    STREAM_STOP, TRANSMIT, VOUT_SAMPLES, Packet, ProtocolError, decode_edges, decode_info, decode_log,
-    decode_result, decode_vout, encode_tone,
+    DEVICE_FRAME_ID, EVENTS, GET_AFE_CONFIG, GET_DEVICE_INFO, LOG, OK, OUT3_EDGES, RESULT_NAMES, SET_AFE_CONFIG,
+    STREAM_END, STREAM_START, STREAM_STOP, TRANSMIT, VOUT_SAMPLES, Packet, ProtocolError, decode_afe, decode_edges,
+    decode_info, decode_log, decode_result, decode_vout, encode_tone,
 )
 
 
@@ -41,6 +42,7 @@ class SessionStatus:
     error: str = ""
     transmitting: bool = False
     transmit_message: str = "Idle"
+    afe: AfeConfig | None = None    # the device's receive front-end configuration, once read
 
 
 @dataclass(frozen=True)
@@ -56,6 +58,11 @@ class StopStream:
 @dataclass(frozen=True)
 class Transmit:
     tone: ToneBurst
+
+
+@dataclass(frozen=True)
+class ApplyAfe:
+    config: AfeConfig
 
 
 class Latest:
@@ -133,6 +140,8 @@ class Session:
             STREAM_START: self._on_stream_started,
             STREAM_STOP: self._on_stream_stopped,
             TRANSMIT: self._on_transmitted,
+            GET_AFE_CONFIG: self._on_afe_config,
+            SET_AFE_CONFIG: self._on_afe_config,
         }
         self.events = {
             LOG: self._on_log,
@@ -154,6 +163,9 @@ class Session:
 
     def transmit(self, tone: ToneBurst):
         self.commands.put(Transmit(tone))
+
+    def apply_afe(self, config: AfeConfig):
+        self.commands.put(ApplyAfe(config))
 
     def close(self):
         self.close_requested.set()
@@ -222,6 +234,8 @@ class Session:
                 self._stop_stream()
             elif isinstance(command, Transmit):
                 self._start_transmit(command.tone)
+            elif isinstance(command, ApplyAfe):
+                self._apply_afe(command.config)
 
     def _start_stream(self):
         if self.connected and not self.closing and self.status.acquisition == AcquisitionState.STOPPED:
@@ -238,6 +252,10 @@ class Session:
             self._status(transmitting=True, transmit_message="Transmitting")
             self._send(TRANSMIT, encode_tone(tone))
 
+    def _apply_afe(self, config):
+        if self.connected and not self.closing and SET_AFE_CONFIG not in self.requests:
+            self._send(SET_AFE_CONFIG, bytes(config))
+
     def _receive(self, packet):
         if packet.message_type in EVENTS:
             if not packet.frame_id & DEVICE_FRAME_ID:
@@ -252,6 +270,7 @@ class Session:
     def _on_device_info(self, packet):
         self.info = decode_info(packet.payload)
         self._status(connection=ConnectionState.CONNECTED, device_name=self.info.name)
+        self._send(GET_AFE_CONFIG)
 
     def _on_stream_started(self, packet):
         result = decode_result(packet.payload)
@@ -272,6 +291,13 @@ class Session:
     def _on_transmitted(self, packet):
         result = decode_result(packet.payload)
         self._status(transmitting=False, transmit_message="Complete" if result == OK else RESULT_NAMES[result])
+
+    def _on_afe_config(self, packet):
+        result, config = decode_afe(packet.payload)
+        if result == OK:
+            self._status(afe=config)
+        else:
+            self._status(error=f"Receiver configuration failed: {RESULT_NAMES[result]}")
 
     def _on_log(self, packet):
         try:

@@ -46,6 +46,19 @@ size_t tf_protocol_encode_device_info(const tf_protocol_device_info_t *info, uin
     return length;
 }
 
+size_t tf_protocol_encode_afe(tf_protocol_result_t result, const uint8_t *values, uint8_t *out, size_t capacity)
+{
+    size_t length = result == TF_PROTOCOL_RESULT_OK ? 1 + TF_PROTOCOL_AFE_SIZE : 1;
+    if (length > capacity) {
+        return 0;
+    }
+    out[0] = (uint8_t)result;
+    if (result == TF_PROTOCOL_RESULT_OK) {
+        memcpy(out + 1, values, TF_PROTOCOL_AFE_SIZE);
+    }
+    return length;
+}
+
 size_t tf_protocol_encode_vout(int64_t first_sample_ns, const uint16_t *millivolts, size_t count, uint8_t *out, size_t capacity)
 {
     if (!count || count > UINT16_MAX || first_sample_ns < 0 || TF_PROTOCOL_VOUT_SIZE(count) > capacity) {

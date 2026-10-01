@@ -10,8 +10,8 @@ from time import monotonic, sleep
 import numpy as np
 
 from .tf_protocol import (
-    DEVICE_FRAME_ID, GET_DEVICE_INFO, LOG, OK, OUT3_EDGES, STREAM_START, STREAM_STOP, TRANSMIT, VERSION,
-    VOUT_SAMPLES, Packet,
+    DEVICE_FRAME_ID, GET_AFE_CONFIG, GET_DEVICE_INFO, LOG, OK, OUT3_EDGES, SET_AFE_CONFIG, STREAM_START,
+    STREAM_STOP, TRANSMIT, VERSION, VOUT_SAMPLES, Packet,
 )
 
 
@@ -34,6 +34,7 @@ class SimulatedDevice:
         self.transmit_request = None
         self.transmit_ready_at = 0.0
         self.random = np.random.default_rng(1)
+        self.afe_registers = bytes([0x00, 0x00, 0x00, 0x00, 0x07, 0x94])     # reset values, zero crossing enabled
 
     def send(self, packet):
         handlers = {
@@ -41,6 +42,8 @@ class SimulatedDevice:
             STREAM_START: self._stream_start,
             STREAM_STOP: self._stream_stop,
             TRANSMIT: self._transmit,
+            GET_AFE_CONFIG: self._afe_config,
+            SET_AFE_CONFIG: self._afe_config,
         }
         handlers[packet.message_type](packet)
 
@@ -85,6 +88,12 @@ class SimulatedDevice:
     def _transmit(self, packet):
         self.transmit_request = packet
         self.transmit_ready_at = monotonic() + self.TRANSMIT_DELAY_S
+
+    def _afe_config(self, packet):
+        if packet.message_type == SET_AFE_CONFIG:
+            self.afe_registers = packet.payload
+            self._event(LOG, f"I (0) DEMO: AFE applied: {packet.payload.hex()}\n".encode())
+        self._respond(packet, bytes([OK]) + self.afe_registers)
 
     def _stream_until(self, now_ns):
         period_ns = 1_000_000_000 // self.VOUT_RATE_HZ

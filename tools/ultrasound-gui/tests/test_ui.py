@@ -36,6 +36,16 @@ class ApplicationTests(unittest.TestCase):
         wait_until(lambda: self.pump() or self.app.status.acquisition == AcquisitionState.STOPPED)
         self.assertIn("Device connected", self.app.console.text.get("1.0", "end"))
 
+    def test_receiver_panel_applies_edits(self):
+        self.app.connect()
+        wait_until(lambda: self.pump() or self.app.receiver.device_config is not None)
+        hysteresis = self.app.receiver.choices[-1]
+        self.assertEqual(hysteresis.get(), "230 mV")
+        hysteresis.current(7)
+        self.app.apply_receiver()
+        wait_until(lambda: self.pump() or self.app.receiver.device_config.registers[5] & 0x07 == 7)
+        self.assertEqual(hysteresis.get(), "380 mV")
+
     def test_single_shot_holds_the_triggered_window(self):
         self.app.connect()
         wait_until(lambda: self.pump() or self.app.status.connection == ConnectionState.CONNECTED)

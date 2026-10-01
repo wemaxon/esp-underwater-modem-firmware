@@ -6,7 +6,7 @@ from ..model import StreamHistory
 from ..trigger import LevelTrigger, SingleShot
 from ..transport import discover_devices, open_device
 from ..session import AcquisitionState, ConnectionState, Session, SessionStatus
-from .controls import AcquisitionControls, ConnectionBar, TransmitControls
+from .controls import AcquisitionControls, ConnectionBar, ReceiverControls, TransmitControls
 from .plot import ScopePlot
 from .log_console import LogConsole
 
@@ -40,13 +40,20 @@ class Application(tk.Tk):
         body.rowconfigure(0, weight=1)
         self.plot = ScopePlot(body)
         self.plot.grid(row=0, column=0, sticky="nsew")
-        sidebar = ttk.Frame(body)
+        sidebar = ttk.Notebook(body)
         sidebar.grid(row=0, column=1, sticky="ns", padx=(6, 10), pady=(0, 8))
-        sidebar.columnconfigure(0, weight=1)
-        self.acquisition = AcquisitionControls(sidebar, self.run_acquisition, self.stop_acquisition, self.force_trigger, self.update_view)
+        measure = ttk.Frame(sidebar, padding=(0, 8, 0, 0))
+        measure.columnconfigure(0, weight=1)
+        sidebar.add(measure, text="Measure")
+        self.acquisition = AcquisitionControls(measure, self.run_acquisition, self.stop_acquisition, self.force_trigger, self.update_view)
         self.acquisition.grid(row=0, column=0, sticky="ew")
-        self.transmission = TransmitControls(sidebar, self.transmit)
+        self.transmission = TransmitControls(measure, self.transmit)
         self.transmission.grid(row=1, column=0, sticky="ew", pady=(12, 0))
+        receiver_tab = ttk.Frame(sidebar, padding=(0, 8, 0, 0))
+        receiver_tab.columnconfigure(0, weight=1)
+        sidebar.add(receiver_tab, text="Receiver")
+        self.receiver = ReceiverControls(receiver_tab, self.apply_receiver)
+        self.receiver.grid(row=0, column=0, sticky="ew")
         self.console = LogConsole(panes)
         panes.add(self.console, weight=1)
         self.footer = ttk.Label(self, textvariable=self.message, padding=(10, 6), anchor="w")
@@ -76,6 +83,7 @@ class Application(tk.Tk):
         if status.acquisition == AcquisitionState.STOPPED:
             self.single = None      # a stream that ended cannot complete a single shot
         self.acquisition.set_status(status, self.single_state(), armed=self.single is not None and not self.single.triggered)
+        self.receiver.set_status(status)
         self.transmission.set_status(status)
         self.message.set(status.error or status.device_name)
         self.footer.configure(foreground="#b33b35" if status.error else "")
@@ -163,6 +171,10 @@ class Application(tk.Tk):
                 self.stop_acquisition()
                 return
         self.plot.show(self.history, self.history.latest_ns)
+
+    def apply_receiver(self):
+        if self.session is not None and self.receiver.device_config is not None:
+            self.session.apply_afe(self.receiver.edited_config())
 
     def transmit(self):
         if self.closing or self.session is None or self.status.connection != ConnectionState.CONNECTED or self.status.transmitting:
