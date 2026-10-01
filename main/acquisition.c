@@ -11,7 +11,7 @@
 #include "esp_timer.h"
 #include "soc/soc_caps.h"
 
-#define VOUT_ATTENUATION    ADC_ATTEN_DB_6      /* up to about 1.3 V; the pin sees at most 1.06 V */
+#define VOUT_ATTENUATION    ADC_ATTEN_DB_12     /* up to about 2.5 V; the pin sees at most 2.24 V */
 #define VOUT_POOL_BYTES     (16U * 1024)        /* about 200 ms of samples */
 #define SAMPLE_PERIOD_NS    (1000000000LL / ACQUISITION_VOUT_RATE_HZ)
 
