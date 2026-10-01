@@ -36,6 +36,21 @@ class ApplicationTests(unittest.TestCase):
         wait_until(lambda: self.pump() or self.app.status.acquisition == AcquisitionState.STOPPED)
         self.assertIn("Device connected", self.app.console.text.get("1.0", "end"))
 
+    def test_single_shot_holds_the_triggered_window(self):
+        self.app.connect()
+        wait_until(lambda: self.pump() or self.app.status.connection == ConnectionState.CONNECTED)
+        self.app.acquisition.mode.set("Single")
+        self.app.acquisition.window_ms.set("50")
+        self.app.acquisition.pre_trigger_ms.set("5")
+        self.app.acquisition.trigger_v.set("1.0")
+        self.app.run_acquisition()
+        wait_until(lambda: self.pump() or self.app.held_ns is not None, timeout=3)
+        wait_until(lambda: self.pump() or self.app.status.acquisition == AcquisitionState.STOPPED)
+        self.assertEqual(self.app.acquisition.state_text.get(), "Captured")
+        times = self.app.plot.vout_line.get_xdata()
+        self.assertLessEqual(times.min(), -4.9)          # pre-trigger data, in ms before the trigger
+        self.assertGreaterEqual(times.max(), 44.9)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -70,6 +70,11 @@ class StreamHistory:
         self.edge_blocks = deque()
         self.latest_ns = 0
 
+    @property
+    def earliest_ns(self):
+        """Time of the oldest VOUT sample, or None without samples."""
+        return int(self.vout_blocks[0].times_ns[0]) if self.vout_blocks else None
+
     def add(self, block: VoutBlock | EdgeBlock):
         if not len(block.times_ns):
             return

@@ -58,6 +58,12 @@ python -m unittest discover -s tools/ultrasound-gui/tests -t tools/ultrasound-gu
 The GUI's interoperability test decodes frames produced by the C host test
 build in `build/host` and is skipped when that build is missing.
 
+The GUI acquires like an oscilloscope. **Roll** shows the newest window of the
+stream continuously. **Single** waits until VOUT rises through the trigger
+level (with 50 mV hysteresis), or until *Force trigger* is pressed, then holds
+the window around the trigger, including the pre-trigger time, and stops the
+stream. Times in a held capture are relative to the trigger.
+
 ## USB interface protocol
 
 The development interface between the firmware and the GUI over USB, not the

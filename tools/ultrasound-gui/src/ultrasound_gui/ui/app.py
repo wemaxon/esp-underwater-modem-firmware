@@ -3,6 +3,7 @@ import tkinter as tk
 from tkinter import ttk
 
 from ..model import StreamHistory
+from ..trigger import LevelTrigger, SingleShot
 from ..transport import discover_devices, open_device
 from ..session import AcquisitionState, ConnectionState, Session, SessionStatus
 from .controls import AcquisitionControls, ConnectionBar, TransmitControls
@@ -24,6 +25,8 @@ class Application(tk.Tk):
         self.status = SessionStatus()
         self.closing = False
         self.history = StreamHistory(span_s=AcquisitionControls.MAX_WINDOW_MS / 1000)
+        self.single = None          # single shot waiting for its trigger or window
+        self.held_ns = None         # trigger time of the single shot on display
         self.message = tk.StringVar()
         self.rowconfigure(1, weight=1)
         self.columnconfigure(0, weight=1)
@@ -40,7 +43,7 @@ class Application(tk.Tk):
         sidebar = ttk.Frame(body)
         sidebar.grid(row=0, column=1, sticky="ns", padx=(6, 10), pady=(0, 8))
         sidebar.columnconfigure(0, weight=1)
-        self.acquisition = AcquisitionControls(sidebar, self.run_acquisition, self.stop_acquisition, self.update_graph_window)
+        self.acquisition = AcquisitionControls(sidebar, self.run_acquisition, self.stop_acquisition, self.force_trigger, self.update_view)
         self.acquisition.grid(row=0, column=0, sticky="ew")
         self.transmission = TransmitControls(sidebar, self.transmit)
         self.transmission.grid(row=1, column=0, sticky="ew", pady=(12, 0))
@@ -70,7 +73,9 @@ class Application(tk.Tk):
     def render_status(self, status):
         self.status = status
         self.connection.set_status(status)
-        self.acquisition.set_status(status)
+        if status.acquisition == AcquisitionState.STOPPED:
+            self.single = None      # a stream that ended cannot complete a single shot
+        self.acquisition.set_status(status, self.single_state(), armed=self.single is not None and not self.single.triggered)
         self.transmission.set_status(status)
         self.message.set(status.error or status.device_name)
         self.footer.configure(foreground="#b33b35" if status.error else "")
@@ -89,31 +94,75 @@ class Application(tk.Tk):
             self.render_status(replace(self.status, connection=ConnectionState.DISCONNECTING))
             self.session.close()
 
-    def update_graph_window(self):
+    def single_state(self):
+        if self.single is not None:
+            return "Triggered" if self.single.triggered else "Waiting for trigger"
+        return "Captured" if self.held_ns is not None and self.status.acquisition == AcquisitionState.STOPPED else None
+
+    def read_settings(self):
         try:
-            self.plot.set_window_ms(self.acquisition.graph_window_ms())
+            return self.acquisition.settings()
         except (ValueError, tk.TclError) as exc:
             self.message.set(str(exc))
             self.footer.configure(foreground="#b33b35")
-            return False
-        self.plot.show(self.history)
+            return None
+
+    def update_view(self):
+        """Applies the window settings: to the held single shot, or as a rolling view."""
+        settings = self.read_settings()
+        if settings is None:
+            return
+        if self.held_ns is not None:
+            self.plot.set_view(settings.window_ms, settings.pre_trigger_ms)
+            self.plot.show(self.history, self.held_ns)
+        else:
+            self.plot.set_view(settings.window_ms, settings.window_ms)
+            self.plot.show(self.history, self.history.latest_ns)
         self.render_status(self.status)
-        return True
 
     def run_acquisition(self):
         if self.closing or self.session is None or self.status.connection != ConnectionState.CONNECTED:
             return
-        if self.status.acquisition != AcquisitionState.STOPPED or not self.update_graph_window():
+        settings = self.read_settings()
+        if self.status.acquisition != AcquisitionState.STOPPED or settings is None:
             return
         self.history.clear()
+        self.held_ns = None
+        self.single = None
+        if settings.single:
+            pre_ns = round(settings.pre_trigger_ms * 1e6)
+            post_ns = round(settings.window_ms * 1e6) - pre_ns
+            self.single = SingleShot(LevelTrigger(settings.trigger_v), pre_ns, post_ns)
         self.plot.reset()
+        self.plot.set_trigger_level(settings.trigger_v if settings.single else None)
+        self.plot.set_view(settings.window_ms, settings.window_ms)
         self.render_status(replace(self.status, acquisition=AcquisitionState.STARTING))
         self.session.start_stream()
 
     def stop_acquisition(self):
         if self.session is not None:
+            self.single = None
             self.render_status(replace(self.status, acquisition=AcquisitionState.STOPPING))
             self.session.stop_stream()
+
+    def force_trigger(self):
+        if self.single is not None:
+            self.single.force(self.history)
+            self.render_status(self.status)
+
+    def show_stream(self):
+        """Rolls the view while streaming; holds the window of a completed single shot."""
+        if self.held_ns is not None:
+            return
+        if self.single is not None:
+            trigger_ns = self.single.update(self.history)
+            if trigger_ns is not None:
+                self.held_ns = trigger_ns
+                self.single = None
+                self.update_view()
+                self.stop_acquisition()
+                return
+        self.plot.show(self.history, self.history.latest_ns)
 
     def transmit(self):
         if self.closing or self.session is None or self.status.connection != ConnectionState.CONNECTED or self.status.transmitting:
@@ -135,7 +184,10 @@ class Application(tk.Tk):
         for block in blocks:
             self.history.add(block)
         if blocks:
-            self.plot.show(self.history)
+            was_triggered = self.single is not None and self.single.triggered
+            self.show_stream()
+            if self.single is not None and self.single.triggered != was_triggered:
+                self.render_status(self.status)
 
     def poll(self):
         if self.session is not None:
