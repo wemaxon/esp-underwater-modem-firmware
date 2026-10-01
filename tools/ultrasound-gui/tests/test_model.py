@@ -3,32 +3,54 @@ import unittest
 import numpy as np
 
 import support  # noqa: F401  (import path setup)
-from ultrasound_gui.model import Capture, ToneBurst
+from ultrasound_gui.model import EdgeBlock, StreamHistory, ToneBurst, VoutBlock
 
 
-class CaptureTests(unittest.TestCase):
-    def test_steps_alternate_from_initial_level(self):
-        capture = Capture(1_000_000, 1000, True, np.array([100, 300]))
-        times, levels = capture.steps()
-        np.testing.assert_allclose(times, [0, 0.1, 0.3, 1.0])
-        np.testing.assert_array_equal(levels, [1, 0, 1, 1])
+def edges(start_ns, count, interval_ns, first_level=True):
+    return EdgeBlock(start_ns + interval_ns * np.arange(count), (np.arange(count) % 2 == 0) == first_level)
 
-    def test_frequency_from_rising_edges(self):
-        capture = Capture(1_000_000, 1000, False, np.arange(12, 800, 12))
-        _, kilohertz = capture.frequency()
-        np.testing.assert_allclose(kilohertz, 1_000_000 / 24 / 1000)
 
-    def test_edges_are_read_only_copies(self):
-        edges = np.array([10, 20], dtype=np.uint32)
-        capture = Capture(1_000_000, 100, False, edges)
-        edges[0] = 99
-        self.assertEqual(capture.edges[0], 10)
-        self.assertFalse(capture.edges.flags.writeable)
+class StreamHistoryTests(unittest.TestCase):
+    def test_vout_window(self):
+        history = StreamHistory()
+        history.add(VoutBlock([0, 50_000, 100_000], [0.1, 0.2, 0.3]))
+        history.add(VoutBlock([150_000, 200_000], [0.4, 0.5]))
+        times, volts = history.vout(50_000, 150_000)
+        np.testing.assert_array_equal(times, [50_000, 100_000, 150_000])
+        np.testing.assert_allclose(volts, [0.2, 0.3, 0.4])
+        self.assertEqual(history.latest_ns, 200_000)
 
-    def test_rejects_invalid_timing(self):
-        for duration, edges in ((0, []), (100, [0]), (100, [100]), (100, [20, 10])):
-            with self.subTest(duration=duration, edges=edges), self.assertRaises(ValueError):
-                Capture(1_000_000, duration, False, np.array(edges, dtype=np.uint32))
+    def test_out3_window_reports_level_before_it(self):
+        history = StreamHistory()
+        history.add(edges(1000, 4, 100))
+        times, levels, initial = history.out3(1150, 2000)
+        np.testing.assert_array_equal(times, [1200, 1300])
+        np.testing.assert_array_equal(levels, [True, False])
+        self.assertFalse(initial)
+        self.assertIsNone(history.out3(0, 500)[2])
+
+    def test_frequency_is_measured_within_blocks(self):
+        history = StreamHistory()
+        history.add(edges(0, 9, 12_500))                # 40 kHz
+        history.add(edges(1_000_000, 5, 25_000))        # 20 kHz, after a gap
+        times, hertz = history.out3_frequency(0, 2_000_000)
+        np.testing.assert_allclose(hertz, [40_000] * 4 + [20_000] * 2)
+        self.assertEqual(times[-1], 1_100_000)
+
+    def test_old_data_is_dropped(self):
+        history = StreamHistory(span_s=1.0)
+        history.add(VoutBlock([0], [0.1]))
+        history.add(edges(0, 2, 10))
+        history.add(VoutBlock([2_000_000_000], [0.2]))
+        self.assertEqual(len(history.vout(0, 3_000_000_000)[0]), 1)
+        self.assertEqual(len(history.out3(0, 3_000_000_000)[0]), 0)
+        history.clear()
+        self.assertEqual(history.latest_ns, 0)
+
+    def test_blocks_are_read_only(self):
+        block = VoutBlock([0], [0.1])
+        with self.assertRaises(ValueError):
+            block.volts[0] = 1
 
 
 class ToneBurstTests(unittest.TestCase):

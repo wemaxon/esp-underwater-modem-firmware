@@ -1,7 +1,8 @@
 #include "usb_interface.h"
 
 #include "TinyFrame.h"
-#include "capture.h"
+#include "acquisition.h"
+#include "edge_capture.h"
 #include "device_log.h"
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -20,16 +21,22 @@ _Static_assert(TF_SENDBUF_LEN >= TF_PROTOCOL_LOG_MAX_LENGTH + FRAME_OVERHEAD, "L
 
 static const char *TAG = "USB_INTERFACE";
 
-static TinyFrame framing;       /* host requests and their responses */
+#define EDGE_BATCH      512U
+#define PAYLOAD_SIZE    TF_PROTOCOL_EDGES_SIZE(EDGE_BATCH)
+
+_Static_assert(PAYLOAD_SIZE >= TF_PROTOCOL_VOUT_SIZE(ACQUISITION_VOUT_BLOCK), "Payload must hold a VOUT block");
+_Static_assert(EDGE_BATCH >= EDGE_CAPTURE_READ_MIN_EDGES, "Edge batch too small for one read");
+
+static TinyFrame framing;       /* requests, responses and stream data; data uses frame IDs 0x8000-0xFFFF */
 static TinyFrame log_framing;   /* device log events, frame IDs 0x8000-0xFFFF */
 static bool write_failed;
 static bool logs_enabled;
-static bool capture_pending;
-static TF_ID capture_id;
+static bool streaming;
 static int64_t last_tick_us;
-static uint8_t payload[TF_PROTOCOL_CAPTURE_SIZE(CAPTURE_EDGE_CAPACITY)];
+static uint8_t payload[PAYLOAD_SIZE];
+static edge_t edges[EDGE_BATCH];
 
-/* Responses wait for USB buffer space; log events are dropped when it is full. */
+/* Responses and stream data wait for USB buffer space; log events are dropped when it is full. */
 void TF_WriteImpl(TinyFrame *tf, const uint8_t *data, uint32_t length)
 {
     if (tf == &log_framing) {
@@ -61,22 +68,6 @@ static void respond_payload(uint8_t type, TF_ID id, size_t length)
     }
 }
 
-static tf_protocol_result_t capture_result(capture_status_t status)
-{
-    switch (status) {
-    case CAPTURE_OK:
-        return TF_PROTOCOL_RESULT_OK;
-    case CAPTURE_BUSY:
-        return TF_PROTOCOL_RESULT_BUSY;
-    case CAPTURE_TIMEOUT:
-        return TF_PROTOCOL_RESULT_TIMEOUT;
-    case CAPTURE_OVERFLOW:
-        return TF_PROTOCOL_RESULT_OVERFLOW;
-    default:
-        return TF_PROTOCOL_RESULT_DEVICE_ERROR;
-    }
-}
-
 static tf_protocol_result_t transmit_result(transmit_status_t status)
 {
     switch (status) {
@@ -93,33 +84,32 @@ static tf_protocol_result_t transmit_result(transmit_status_t status)
 
 static void get_device_info(const TF_Msg *request)
 {
-    tf_protocol_device_info_t info = {.name = DEVICE_NAME, .tick_hz = CAPTURE_CLOCK_HZ, .max_edges = CAPTURE_EDGE_CAPACITY};
+    tf_protocol_device_info_t info = {.name = DEVICE_NAME, .vout_rate_hz = ACQUISITION_VOUT_RATE_HZ, .edge_clock_hz = ACQUISITION_EDGE_CLOCK_HZ};
     respond_payload(request->type, request->frame_id, tf_protocol_encode_device_info(&info, payload, sizeof(payload)));
     logs_enabled = !write_failed;
     ESP_LOGI(TAG, "Device info requested; protocol %u", TF_PROTOCOL_VERSION);
 }
 
-/* The response is sent by poll_capture() once the capture has finished. */
-static void start_capture(const TF_Msg *request)
+static tf_protocol_result_t stop_streaming(void)
 {
-    capture_status_t status = capture_start();
-    if (status == CAPTURE_OK) {
-        capture_pending = true;
-        capture_id = request->frame_id;
-    } else {
-        respond_result(request->type, request->frame_id, capture_result(status));
+    if (!streaming) {
+        return TF_PROTOCOL_RESULT_OK;
     }
+    streaming = false;
+    return acquisition_stop() == ESP_OK ? TF_PROTOCOL_RESULT_OK : TF_PROTOCOL_RESULT_DEVICE_ERROR;
 }
 
-static void stop_capture(const TF_Msg *request)
+static void start_stream(const TF_Msg *request)
 {
-    tf_protocol_result_t result = capture_result(capture_stop());
-    if (capture_pending) {
-        ESP_LOGI(TAG, "Host requested capture stop; result=%u", result);
-        respond_result(TF_PROTOCOL_MSG_CAPTURE, capture_id, result == TF_PROTOCOL_RESULT_OK ? TF_PROTOCOL_RESULT_CANCELLED : result);
-        capture_pending = false;
+    if (!streaming) {
+        streaming = acquisition_start() == ESP_OK;
     }
-    respond_result(request->type, request->frame_id, result);
+    respond_result(request->type, request->frame_id, streaming ? TF_PROTOCOL_RESULT_OK : TF_PROTOCOL_RESULT_DEVICE_ERROR);
+}
+
+static void stop_stream(const TF_Msg *request)
+{
+    respond_result(request->type, request->frame_id, stop_streaming());
 }
 
 static void transmit(const TF_Msg *request)
@@ -136,8 +126,8 @@ typedef struct {
 
 static const command_t commands[] = {
     {TF_PROTOCOL_MSG_GET_DEVICE_INFO, 0, get_device_info},
-    {TF_PROTOCOL_MSG_CAPTURE, 0, start_capture},
-    {TF_PROTOCOL_MSG_STOP, 0, stop_capture},
+    {TF_PROTOCOL_MSG_STREAM_START, 0, start_stream},
+    {TF_PROTOCOL_MSG_STREAM_STOP, 0, stop_stream},
     {TF_PROTOCOL_MSG_TRANSMIT, TF_PROTOCOL_TONE_SIZE, transmit},
 };
 
@@ -155,21 +145,64 @@ static TF_Result on_request(TinyFrame *tf, TF_Msg *request)
     return TF_STAY;
 }
 
-static void poll_capture(void)
+static void send_event(uint8_t type, const uint8_t *data, size_t length)
 {
-    if (!capture_pending || write_failed) {
+    TF_SendSimple(&framing, type, data, (TF_LEN)length);
+}
+
+/* Each returns false if data could not be encoded. */
+static bool forward_vout(void)
+{
+    static uint16_t millivolts[ACQUISITION_VOUT_BLOCK];
+    int64_t first_sample_ns;
+    size_t count;
+    while (!write_failed && (count = acquisition_read_vout(&first_sample_ns, millivolts))) {
+        size_t length = tf_protocol_encode_vout(first_sample_ns, millivolts, count, payload, sizeof(payload));
+        if (!length) {
+            return false;
+        }
+        send_event(TF_PROTOCOL_MSG_VOUT_SAMPLES, payload, length);
+    }
+    return true;
+}
+
+static bool forward_out3(void)
+{
+    const uint32_t ns_per_tick = 1000000000U / ACQUISITION_EDGE_CLOCK_HZ;
+    size_t count;
+    while (!write_failed && (count = acquisition_read_out3(edges, EDGE_BATCH))) {
+        size_t encoded;
+        for (size_t sent = 0; sent < count; sent += encoded) {
+            size_t length = tf_protocol_encode_edges(edges + sent, count - sent, ns_per_tick, payload, sizeof(payload), &encoded);
+            if (!length) {
+                return false;
+            }
+            send_event(TF_PROTOCOL_MSG_OUT3_EDGES, payload, length);
+        }
+    }
+    return true;
+}
+
+static void end_stream(tf_protocol_result_t result)
+{
+    ESP_LOGE(TAG, "Stream ended: %s", result == TF_PROTOCOL_RESULT_OVERFLOW ? "data lost, buffer overflow" : "device error");
+    stop_streaming();
+    uint8_t data = (uint8_t)result;
+    send_event(TF_PROTOCOL_MSG_STREAM_END, &data, sizeof(data));
+}
+
+/* Sends buffered stream data; ends the stream if the device lost data or failed. */
+static void forward_stream(void)
+{
+    if (!streaming || write_failed) {
         return;
     }
-    const edge_trace_t *trace;
-    capture_status_t status = capture_poll(&trace);
-    if (status == CAPTURE_PENDING) {
-        return;
-    }
-    capture_pending = false;
-    if (status == CAPTURE_OK) {
-        respond_payload(TF_PROTOCOL_MSG_CAPTURE, capture_id, tf_protocol_encode_capture(trace, payload, sizeof(payload)));
-    } else {
-        respond_result(TF_PROTOCOL_MSG_CAPTURE, capture_id, capture_result(status));
+    bool encoded = forward_vout() && forward_out3();
+    acquisition_status_t status = acquisition_status();
+    if (status == ACQUISITION_OVERFLOW) {
+        end_stream(TF_PROTOCOL_RESULT_OVERFLOW);
+    } else if (!encoded || status == ACQUISITION_ERROR) {
+        end_stream(TF_PROTOCOL_RESULT_DEVICE_ERROR);
     }
 }
 
@@ -184,8 +217,7 @@ static void forward_log(void)
 /* Drops all host state: the host disconnected or stopped reading. */
 static void reset(void)
 {
-    capture_stop();
-    capture_pending = false;
+    stop_streaming();
     logs_enabled = false;
     TF_ResetParser(&framing);
     write_failed = false;
@@ -216,7 +248,7 @@ void usb_interface_poll(void)
     for (; now - last_tick_us >= TF_TICK_US; last_tick_us += TF_TICK_US) {
         TF_Tick(&framing);
     }
-    poll_capture();
+    forward_stream();
     forward_log();
     if (write_failed) {
         reset();

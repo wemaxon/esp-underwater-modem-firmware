@@ -49,39 +49,38 @@ class ConnectionBar(ttk.Frame):
 
 
 class AcquisitionControls(ttk.LabelFrame):
+    MIN_WINDOW_MS = 1.0
+    MAX_WINDOW_MS = 2000.0
+
     def __init__(self, master, run, stop, window_changed):
         super().__init__(master, text="Acquisition", padding=12)
         self.columnconfigure(0, weight=1)
-        self.mode = tk.StringVar(value="Continuous")
-        self.window_ms = tk.StringVar(value="20")
+        self.window_ms = tk.StringVar(value="100")
         self.state_text = tk.StringVar(value="Stopped")
         ttk.Label(self, textvariable=self.state_text).grid(row=0, column=0, sticky="w", pady=(0, 12))
-        ttk.Label(self, text="Mode").grid(row=1, column=0, sticky="w")
-        self.mode_input = ttk.Combobox(self, textvariable=self.mode, values=["Continuous", "Single"], state="readonly", width=18)
-        self.mode_input.grid(row=2, column=0, sticky="ew", pady=(4, 12))
-        ttk.Label(self, text="Graph window (ms)").grid(row=3, column=0, sticky="w")
-        self.window_input = ttk.Spinbox(self, textvariable=self.window_ms, from_=0.1, to=10000, increment=1, command=window_changed, width=18)
-        self.window_input.grid(row=4, column=0, sticky="ew", pady=(4, 12))
+        ttk.Label(self, text="Window (ms)").grid(row=1, column=0, sticky="w")
+        self.window_input = ttk.Spinbox(self, textvariable=self.window_ms, from_=self.MIN_WINDOW_MS, to=self.MAX_WINDOW_MS,
+                                        increment=10, command=window_changed, width=18)
+        self.window_input.grid(row=2, column=0, sticky="ew", pady=(4, 12))
         self.window_input.bind("<Return>", lambda event: window_changed())
         self.window_input.bind("<FocusOut>", lambda event: window_changed())
         self.run_button = ttk.Button(self, text="Run", command=run)
-        self.run_button.grid(row=5, column=0, sticky="ew", pady=(0, 6))
+        self.run_button.grid(row=3, column=0, sticky="ew", pady=(0, 6))
         self.stop_button = ttk.Button(self, text="Stop", command=stop)
-        self.stop_button.grid(row=6, column=0, sticky="ew")
+        self.stop_button.grid(row=4, column=0, sticky="ew")
 
     def graph_window_ms(self):
         value = float(self.window_ms.get())
-        if not isfinite(value) or not 0.1 <= value <= 10000:
-            raise ValueError("Graph window must be between 0.1 and 10000 ms")
+        if not isfinite(value) or not self.MIN_WINDOW_MS <= value <= self.MAX_WINDOW_MS:
+            raise ValueError(f"Window must be between {self.MIN_WINDOW_MS:g} and {self.MAX_WINDOW_MS:g} ms")
         return value
 
     def set_status(self, status: SessionStatus):
         ready = status.connection == ConnectionState.CONNECTED
-        idle = status.acquisition in (AcquisitionState.STOPPED, AcquisitionState.COMPLETE)
         self.state_text.set(status.acquisition.value)
-        self.mode_input.configure(state="readonly" if idle else "disabled")
-        self.run_button.configure(state="normal" if ready and idle else "disabled")
-        self.stop_button.configure(state="normal" if ready and status.acquisition in (AcquisitionState.STARTING, AcquisitionState.CAPTURING) else "disabled")
+        self.run_button.configure(state="normal" if ready and status.acquisition == AcquisitionState.STOPPED else "disabled")
+        running = status.acquisition in (AcquisitionState.STARTING, AcquisitionState.STREAMING)
+        self.stop_button.configure(state="normal" if ready and running else "disabled")
 
 
 class TransmitControls(ttk.LabelFrame):

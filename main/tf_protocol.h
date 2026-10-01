@@ -10,44 +10,52 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "edge_trace.h"
+#include "edge_decoder.h"
 #include "transmit.h"
 
-#define TF_PROTOCOL_VERSION 5
+#define TF_PROTOCOL_VERSION 6
 
 typedef enum {
     TF_PROTOCOL_MSG_GET_DEVICE_INFO = 1,
-    TF_PROTOCOL_MSG_CAPTURE = 2,
-    TF_PROTOCOL_MSG_STOP = 3,
+    TF_PROTOCOL_MSG_STREAM_START = 2,
+    TF_PROTOCOL_MSG_STREAM_STOP = 3,
     TF_PROTOCOL_MSG_TRANSMIT = 4,
-    TF_PROTOCOL_MSG_LOG = 5,
+    TF_PROTOCOL_MSG_LOG = 5,            /* device event */
+    TF_PROTOCOL_MSG_VOUT_SAMPLES = 6,   /* device event */
+    TF_PROTOCOL_MSG_OUT3_EDGES = 7,     /* device event */
+    TF_PROTOCOL_MSG_STREAM_END = 8,     /* device event */
 } tf_protocol_message_t;
 
 typedef enum {
     TF_PROTOCOL_RESULT_OK = 0,
     TF_PROTOCOL_RESULT_INVALID_REQUEST = 1,
-    TF_PROTOCOL_RESULT_BUSY = 2,
-    TF_PROTOCOL_RESULT_TIMEOUT = 3,
-    TF_PROTOCOL_RESULT_CANCELLED = 4,
-    TF_PROTOCOL_RESULT_OVERFLOW = 5,
-    TF_PROTOCOL_RESULT_DEVICE_ERROR = 6,
+    TF_PROTOCOL_RESULT_TIMEOUT = 2,
+    TF_PROTOCOL_RESULT_OVERFLOW = 3,
+    TF_PROTOCOL_RESULT_DEVICE_ERROR = 4,
 } tf_protocol_result_t;
 
 #define TF_PROTOCOL_LOG_MAX_LENGTH       255U
 #define TF_PROTOCOL_TONE_SIZE            6U
-#define TF_PROTOCOL_INFO_HEADER_SIZE     7U
-#define TF_PROTOCOL_CAPTURE_HEADER_SIZE  8U
-#define TF_PROTOCOL_CAPTURE_SIZE(edges)  (TF_PROTOCOL_CAPTURE_HEADER_SIZE + 4U * (edges))
+#define TF_PROTOCOL_VOUT_SIZE(samples)   (10U + 2U * (samples))
+#define TF_PROTOCOL_EDGES_SIZE(edges)    (11U + 2U * ((edges) - 1U))
 
 typedef struct {
     const char *name;
-    uint32_t tick_hz;
-    uint16_t max_edges;
+    uint32_t vout_rate_hz;
+    uint32_t edge_clock_hz;
 } tf_protocol_device_info_t;
 
 /* Encoders return the payload length, or 0 if the input is invalid or does not fit. */
 size_t tf_protocol_encode_device_info(const tf_protocol_device_info_t *info, uint8_t *out, size_t capacity);
-size_t tf_protocol_encode_capture(const edge_trace_t *trace, uint8_t *out, size_t capacity);
+size_t tf_protocol_encode_vout(int64_t first_sample_ns, const uint16_t *millivolts, size_t count, uint8_t *out, size_t capacity);
+
+/*
+ * Encodes a run of consecutive edges: as many as fit, alternate in level and
+ * are spaced by at most 65535 ticks of ns_per_tick. Sets *encoded to the number
+ * of edges included (at least one if any fit).
+ */
+size_t tf_protocol_encode_edges(const edge_t *edges, size_t count, uint32_t ns_per_tick,
+                                uint8_t *out, size_t capacity, size_t *encoded);
 
 /* Decodes a TRANSMIT request payload of exactly TF_PROTOCOL_TONE_SIZE bytes. */
 tone_burst_t tf_protocol_decode_tone(const uint8_t *data);

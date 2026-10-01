@@ -1,7 +1,7 @@
 idf_component_register(
     SRCS
         "edge_capture.c"
-        "edge_trace.c"
+        "edge_decoder.c"
 
     INCLUDE_DIRS
         "include"
@@ -11,4 +11,6 @@ idf_component_register(
 
     PRIV_REQUIRES
         esp_driver_rmt
+        esp_ringbuf
+        esp_timer
 )

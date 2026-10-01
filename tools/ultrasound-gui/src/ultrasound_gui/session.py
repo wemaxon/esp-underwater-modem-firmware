@@ -1,7 +1,8 @@
 """Device session: owns one connection on a worker thread.
 
 Public methods are thread-safe and only queue commands. Results are published
-through `statuses` and `frames` (latest value wins) and the bounded log queue.
+through `statuses` (latest value wins), the stream data queue and the bounded
+log queue.
 """
 
 from dataclasses import dataclass, replace
@@ -12,8 +13,9 @@ from time import monotonic
 
 from .model import ToneBurst
 from .tf_protocol import (
-    CANCELLED, CAPTURE, GET_DEVICE_INFO, LOG, OK, RESULT_NAMES, STOP, TIMEOUT, TRANSMIT,
-    Packet, ProtocolError, decode_capture, decode_info, decode_log, encode_tone,
+    DEVICE_FRAME_ID, EVENTS, GET_DEVICE_INFO, LOG, OK, OUT3_EDGES, RESULT_NAMES, STREAM_END, STREAM_START,
+    STREAM_STOP, TRANSMIT, VOUT_SAMPLES, Packet, ProtocolError, decode_edges, decode_info, decode_log,
+    decode_result, decode_vout, encode_tone,
 )
 
 
@@ -27,16 +29,14 @@ class ConnectionState(Enum):
 class AcquisitionState(Enum):
     STOPPED = "Stopped"
     STARTING = "Starting"
-    CAPTURING = "Capturing"
+    STREAMING = "Streaming"
     STOPPING = "Stopping"
-    COMPLETE = "Complete"
 
 
 @dataclass(frozen=True)
 class SessionStatus:
     connection: ConnectionState = ConnectionState.DISCONNECTED
     acquisition: AcquisitionState = AcquisitionState.STOPPED
-    captures_received: int = 0
     device_name: str = ""
     error: str = ""
     transmitting: bool = False
@@ -44,12 +44,12 @@ class SessionStatus:
 
 
 @dataclass(frozen=True)
-class StartCapture:
-    continuous: bool
+class StartStream:
+    pass
 
 
 @dataclass(frozen=True)
-class StopCapture:
+class StopStream:
     pass
 
 
@@ -75,10 +75,20 @@ class Latest:
             return value
 
 
+def _drain(queue, limit=None):
+    items = []
+    while limit is None or len(items) < limit:
+        try:
+            items.append(queue.get_nowait())
+        except Empty:
+            break
+    return items
+
+
 class Requests:
     """Outstanding host requests, at most one per message type."""
 
-    ID_LIMIT = 0x8000       # host frame IDs; the device uses 0x8000-0xFFFF
+    ID_LIMIT = DEVICE_FRAME_ID      # host frame IDs stay below the device's
 
     def __init__(self, timeout):
         self.timeout = timeout
@@ -109,7 +119,8 @@ class Requests:
 class Session:
     def __init__(self, device_factory, timeout=3.0):
         self.device_factory = device_factory
-        self.statuses, self.frames = Latest(), Latest()
+        self.statuses = Latest()
+        self.blocks = Queue()               # VoutBlock and EdgeBlock, in arrival order
         self.logs = Queue(maxsize=256)
         self.commands, self.close_requested, self.done = Queue(), Event(), Event()
         self.thread = Thread(target=self._run, name="device-session")
@@ -117,13 +128,17 @@ class Session:
         self.requests = Requests(timeout)
         self.device = None
         self.info = None
-        self.continuous = False
-        self.handlers = {
-            LOG: self._on_log,
+        self.responses = {
             GET_DEVICE_INFO: self._on_device_info,
-            STOP: self._on_stop,
-            CAPTURE: self._on_capture,
-            TRANSMIT: self._on_transmit,
+            STREAM_START: self._on_stream_started,
+            STREAM_STOP: self._on_stream_stopped,
+            TRANSMIT: self._on_transmitted,
+        }
+        self.events = {
+            LOG: self._on_log,
+            VOUT_SAMPLES: self._on_vout,
+            OUT3_EDGES: self._on_edges,
+            STREAM_END: self._on_stream_end,
         }
 
     # Public API, callable from any thread
@@ -131,11 +146,11 @@ class Session:
     def open(self):
         self.thread.start()
 
-    def start_acquisition(self, continuous=False):
-        self.commands.put(StartCapture(bool(continuous)))
+    def start_stream(self):
+        self.commands.put(StartStream())
 
-    def stop_acquisition(self):
-        self.commands.put(StopCapture())
+    def stop_stream(self):
+        self.commands.put(StopStream())
 
     def transmit(self, tone: ToneBurst):
         self.commands.put(Transmit(tone))
@@ -143,14 +158,11 @@ class Session:
     def close(self):
         self.close_requested.set()
 
+    def take_blocks(self):
+        return _drain(self.blocks)
+
     def take_logs(self):
-        entries = []
-        for _ in range(self.logs.maxsize):
-            try:
-                entries.append(self.logs.get_nowait())
-            except Empty:
-                break
-        return entries
+        return _drain(self.logs, self.logs.maxsize)
 
     # Worker thread
 
@@ -161,6 +173,10 @@ class Session:
     @property
     def closing(self):
         return self.close_requested.is_set()
+
+    @property
+    def streaming(self):
+        return self.status.acquisition in (AcquisitionState.STARTING, AcquisitionState.STREAMING)
 
     def _status(self, **changes):
         self.status = replace(self.status, **changes)
@@ -174,7 +190,7 @@ class Session:
         error = ""
         try:
             self.device = self.device_factory()
-            self._send(STOP)        # cancel whatever a previous session left running
+            self._send(STREAM_STOP)     # end a stream a previous session left running
             while not self._finished():
                 self._process_commands()
                 for packet in self.device.read():
@@ -194,103 +210,87 @@ class Session:
     def _finished(self):
         if not self.closing:
             return False
-        if CAPTURE in self.requests:
-            self._stop_capture()
+        if self.streaming:
+            self._stop_stream()
         return not self.requests
 
     def _process_commands(self):
-        while True:
-            try:
-                command = self.commands.get_nowait()
-            except Empty:
-                return
-            if isinstance(command, StartCapture):
-                self._start_capture(command.continuous)
-            elif isinstance(command, StopCapture):
-                self._request_stop()
+        for command in _drain(self.commands):
+            if isinstance(command, StartStream):
+                self._start_stream()
+            elif isinstance(command, StopStream):
+                self._stop_stream()
             elif isinstance(command, Transmit):
                 self._start_transmit(command.tone)
 
-    def _start_capture(self, continuous):
-        if not self.connected or self.closing or CAPTURE in self.requests or STOP in self.requests:
-            return
-        self.continuous = continuous
-        self._status(acquisition=AcquisitionState.CAPTURING, error="")
-        self._send(CAPTURE)
+    def _start_stream(self):
+        if self.connected and not self.closing and self.status.acquisition == AcquisitionState.STOPPED:
+            self._status(acquisition=AcquisitionState.STARTING, error="")
+            self._send(STREAM_START)
 
-    def _request_stop(self):
-        self.continuous = False
-        if CAPTURE in self.requests:
-            self._stop_capture()
-        elif STOP not in self.requests:
-            self._status(acquisition=AcquisitionState.STOPPED)
-
-    def _stop_capture(self):
-        self.continuous = False
-        if STOP not in self.requests:
+    def _stop_stream(self):
+        if self.streaming and STREAM_STOP not in self.requests:
             self._status(acquisition=AcquisitionState.STOPPING)
-            self._send(STOP)
+            self._send(STREAM_STOP)
 
     def _start_transmit(self, tone):
-        if not self.connected or self.closing or TRANSMIT in self.requests:
-            return
-        self._status(transmitting=True, transmit_message="Transmitting")
-        self._send(TRANSMIT, encode_tone(tone))
+        if self.connected and not self.closing and TRANSMIT not in self.requests:
+            self._status(transmitting=True, transmit_message="Transmitting")
+            self._send(TRANSMIT, encode_tone(tone))
 
     def _receive(self, packet):
-        handler = self.handlers.get(packet.message_type)
-        if handler is None:
+        if packet.message_type in EVENTS:
+            if not packet.frame_id & DEVICE_FRAME_ID:
+                raise ProtocolError("Device event without a device frame ID")
+            self.events[packet.message_type](packet)
+        elif packet.message_type in self.responses:
+            self.requests.close(packet)
+            self.responses[packet.message_type](packet)
+        else:
             raise ProtocolError(f"Unknown message type {packet.message_type}")
-        if packet.message_type == LOG:
-            handler(packet)
-            return
-        if packet.message_type == CAPTURE and self.status.connection == ConnectionState.CONNECTING:
-            return      # the cancelled capture of a previous session
-        self.requests.close(packet)
-        handler(packet)
-
-    def _on_log(self, packet):
-        if not packet.frame_id & 0x8000:
-            raise ProtocolError("Invalid device log frame ID")
-        try:
-            self.logs.put_nowait(decode_log(packet.payload))
-        except Full:
-            pass
 
     def _on_device_info(self, packet):
         self.info = decode_info(packet.payload)
         self._status(connection=ConnectionState.CONNECTED, device_name=self.info.name)
 
-    def _on_stop(self, packet):
-        if packet.payload != bytes([OK]) or CAPTURE in self.requests:
-            raise ProtocolError("Invalid STOP response")
+    def _on_stream_started(self, packet):
+        result = decode_result(packet.payload)
+        if result == OK:
+            if self.status.acquisition == AcquisitionState.STARTING:
+                self._status(acquisition=AcquisitionState.STREAMING)
+        else:
+            self._status(acquisition=AcquisitionState.STOPPED, error=RESULT_NAMES[result])
+
+    def _on_stream_stopped(self, packet):
+        result = decode_result(packet.payload)
         self._status(acquisition=AcquisitionState.STOPPED)
+        if result != OK:
+            self._status(error=RESULT_NAMES[result])
         if self.status.connection == ConnectionState.CONNECTING and not self.closing:
             self._send(GET_DEVICE_INFO)
 
-    def _on_capture(self, packet):
-        if len(packet.payload) == 1:
-            self._on_capture_failed(packet.payload[0])
-            return
-        self.frames.put(decode_capture(packet.payload, self.info))
-        self._status(captures_received=self.status.captures_received + 1)
-        if self.continuous and not self.closing:
-            self._send(CAPTURE)
-        elif STOP not in self.requests:
-            self._status(acquisition=AcquisitionState.COMPLETE)
-
-    def _on_capture_failed(self, result):
-        if result == CANCELLED and STOP in self.requests:
-            return
-        if result == TIMEOUT and self.continuous:
-            self._send(CAPTURE)
-            return
-        self.continuous = False
-        error = RESULT_NAMES[result] if 0 < result < len(RESULT_NAMES) else "Invalid capture result"
-        self._status(acquisition=AcquisitionState.STOPPED, error=error)
-
-    def _on_transmit(self, packet):
-        if len(packet.payload) != 1 or packet.payload[0] >= len(RESULT_NAMES):
-            raise ProtocolError("Invalid transmit response")
-        result = packet.payload[0]
+    def _on_transmitted(self, packet):
+        result = decode_result(packet.payload)
         self._status(transmitting=False, transmit_message="Complete" if result == OK else RESULT_NAMES[result])
+
+    def _on_log(self, packet):
+        try:
+            self.logs.put_nowait(decode_log(packet.payload))
+        except Full:
+            pass
+
+    # Stream data is only accepted once the device is known; data of a
+    # previous session's stream may still arrive while connecting.
+
+    def _on_vout(self, packet):
+        if self.info is not None:
+            self.blocks.put(decode_vout(packet.payload, self.info))
+
+    def _on_edges(self, packet):
+        if self.info is not None:
+            self.blocks.put(decode_edges(packet.payload, self.info))
+
+    def _on_stream_end(self, packet):
+        result = decode_result(packet.payload)
+        if self.info is not None:
+            self._status(acquisition=AcquisitionState.STOPPED, error=f"Stream ended: {RESULT_NAMES[result]}")

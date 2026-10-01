@@ -19,5 +19,9 @@
 #define BOARD_PIN_TUSS4470_SDO   GPIO_NUM_5
 #define BOARD_PIN_TUSS4470_CS    GPIO_NUM_7
 
+/* VOUT reaches its ADC pin through a divider: 10 kOhm in series, 4.7 kOhm to GND. */
+#define BOARD_VOUT_DIVIDER_TOP_OHMS     10000U
+#define BOARD_VOUT_DIVIDER_BOTTOM_OHMS  4700U
+
 /* Initializes the SPI bus and the TUSS4470, configured to output zero crossings on OUT3. */
 esp_err_t board_init(void);

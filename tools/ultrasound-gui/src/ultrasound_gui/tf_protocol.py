@@ -1,3 +1,5 @@
+"""TinyFrame USB interface to the firmware (README "USB interface protocol")."""
+
 from dataclasses import dataclass
 import re
 from struct import Struct
@@ -6,30 +8,19 @@ from time import monotonic
 import numpy as np
 
 from ._vendor.ponyframe.TinyFrame import TF, TinyFrame
-from .model import Capture, DeviceInfo
+from .model import DeviceInfo, EdgeBlock, VoutBlock
 
-
-GET_DEVICE_INFO = 1
-CAPTURE = 2
-STOP = 3
-TRANSMIT = 4
-LOG = 5
-VERSION = 5
-OK, INVALID_REQUEST, BUSY, TIMEOUT, CANCELLED, OVERFLOW, DEVICE_ERROR = range(7)
-RESULT_NAMES = ("OK", "Invalid request", "Device busy", "Operation timed out", "Capture cancelled", "Capture buffer overflow", "Device error")
-_INFO = Struct("<BIH")
-_CAPTURE = Struct("<BBIH")
+VERSION = 6
+GET_DEVICE_INFO, STREAM_START, STREAM_STOP, TRANSMIT, LOG, VOUT_SAMPLES, OUT3_EDGES, STREAM_END = range(1, 9)
+EVENTS = frozenset((LOG, VOUT_SAMPLES, OUT3_EDGES, STREAM_END))
+DEVICE_FRAME_ID = 0x8000        # set in the frame ID of every device event
+OK, INVALID_REQUEST, TIMEOUT, OVERFLOW, DEVICE_ERROR = range(5)
+RESULT_NAMES = ("OK", "Invalid request", "Operation timed out", "Data lost: device buffer overflow", "Device error")
+_INFO = Struct("<BII")
+_VOUT = Struct("<QH")
+_EDGES = Struct("<QBH")
 _TONE = Struct("<IH")
-
-
-def encode_tone(tone):
-    return _TONE.pack(tone.frequency_hz, tone.cycles)
-
-
-def decode_log(payload):
-    if not 1 <= len(payload) <= 255:
-        raise ProtocolError("Invalid log payload")
-    return re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", payload.decode("utf-8", errors="replace"))
+_TERMINAL_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
 class ProtocolError(ValueError):
@@ -63,26 +54,6 @@ def encode(packet: Packet):
     return bytes(output[0])
 
 
-def decode_info(payload):
-    if len(payload) <= _INFO.size:
-        raise ProtocolError("Invalid device information")
-    version, tick_hz, max_edges = _INFO.unpack_from(payload)
-    if version != VERSION:
-        raise ProtocolError(f"Device protocol version {version}; expected {VERSION}. Update the firmware and GUI together.")
-    if not tick_hz or not max_edges or max_edges > (65535 - _CAPTURE.size) // 4:
-        raise ProtocolError("Invalid device capture limits")
-    return DeviceInfo(payload[_INFO.size:].decode("utf-8"), tick_hz, max_edges)
-
-
-def decode_capture(payload, info):
-    if len(payload) < _CAPTURE.size:
-        raise ProtocolError("Truncated capture")
-    result, initial, duration, count = _CAPTURE.unpack_from(payload)
-    if result != OK or initial > 1 or count > info.max_edges or len(payload) != _CAPTURE.size + 4 * count:
-        raise ProtocolError("Invalid capture payload")
-    return Capture(info.tick_hz, duration, bool(initial), np.frombuffer(payload, "<u4", count, _CAPTURE.size))
-
-
 class Decoder:
     def __init__(self, timeout=0.5):
         self.framing = _tinyframe()
@@ -104,3 +75,56 @@ class Decoder:
         self.packets = []
         self.framing.accept(data)
         return self.packets
+
+
+def encode_tone(tone):
+    return _TONE.pack(tone.frequency_hz, tone.cycles)
+
+
+def decode_result(payload):
+    if len(payload) != 1 or payload[0] >= len(RESULT_NAMES):
+        raise ProtocolError("Invalid result")
+    return payload[0]
+
+
+def decode_log(payload):
+    if not 1 <= len(payload) <= 255:
+        raise ProtocolError("Invalid log payload")
+    return _TERMINAL_ESCAPE.sub("", payload.decode("utf-8", errors="replace"))
+
+
+def decode_info(payload):
+    if len(payload) <= _INFO.size:
+        raise ProtocolError("Invalid device information")
+    version, vout_rate_hz, edge_clock_hz = _INFO.unpack_from(payload)
+    if version != VERSION:
+        raise ProtocolError(f"Device protocol version {version}; expected {VERSION}. Update the firmware and GUI together.")
+    if not vout_rate_hz or not edge_clock_hz or 1_000_000_000 % vout_rate_hz or 1_000_000_000 % edge_clock_hz:
+        raise ProtocolError("Invalid device sample rates")
+    return DeviceInfo(payload[_INFO.size:].decode("utf-8"), vout_rate_hz, edge_clock_hz)
+
+
+def decode_vout(payload, info: DeviceInfo):
+    if len(payload) < _VOUT.size:
+        raise ProtocolError("Truncated VOUT samples")
+    first_ns, count = _VOUT.unpack_from(payload)
+    if not count or len(payload) != _VOUT.size + 2 * count:
+        raise ProtocolError("Invalid VOUT samples")
+    millivolts = np.frombuffer(payload, "<u2", count, _VOUT.size)
+    period_ns = 1_000_000_000 // info.vout_rate_hz
+    return VoutBlock(first_ns + period_ns * np.arange(count, dtype=np.int64), millivolts / 1000)
+
+
+def decode_edges(payload, info: DeviceInfo):
+    if len(payload) < _EDGES.size:
+        raise ProtocolError("Truncated OUT3 edges")
+    first_ns, level, count = _EDGES.unpack_from(payload)
+    if not count or level > 1 or len(payload) != _EDGES.size + 2 * (count - 1):
+        raise ProtocolError("Invalid OUT3 edges")
+    intervals = np.frombuffer(payload, "<u2", count - 1, _EDGES.size).astype(np.int64)
+    if np.any(intervals == 0):
+        raise ProtocolError("OUT3 edges must be strictly increasing")
+    ns_per_tick = 1_000_000_000 // info.edge_clock_hz
+    times = first_ns + ns_per_tick * np.concatenate(([0], np.cumsum(intervals)))
+    levels = (np.arange(count) % 2 == 0) == bool(level)    # edges alternate, starting with level
+    return EdgeBlock(times, levels)

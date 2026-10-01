@@ -19,9 +19,9 @@ endif()
 
 enable_testing()
 
-add_executable(test_edge_trace test_edge_trace.c
-    ${ROOT}/components/edge_capture/edge_trace.c)
-target_include_directories(test_edge_trace PRIVATE
+add_executable(test_edge_decoder test_edge_decoder.c
+    ${ROOT}/components/edge_capture/edge_decoder.c)
+target_include_directories(test_edge_decoder PRIVATE
     ${ROOT}/components/edge_capture/include)
 
 add_executable(test_tuss4470_frame test_tuss4470_frame.c
@@ -42,10 +42,10 @@ target_include_directories(test_tf_protocol PRIVATE
     ${ROOT}/components/edge_capture/include)
 target_link_libraries(test_tf_protocol PRIVATE tinyframe)
 
-foreach(test test_edge_trace test_tuss4470_frame test_tf_protocol)
+foreach(test test_edge_decoder test_tuss4470_frame test_tf_protocol)
     target_compile_options(${test} PRIVATE ${STRICT_WARNINGS})
 endforeach()
 
-add_test(NAME edge_trace COMMAND test_edge_trace)
+add_test(NAME edge_decoder COMMAND test_edge_decoder)
 add_test(NAME tuss4470_frame COMMAND test_tuss4470_frame)
 add_test(NAME tf_protocol COMMAND test_tf_protocol)

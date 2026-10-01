@@ -4,7 +4,7 @@ idf_component_register(
         "board.c"
         "usb_interface.c"
         "tf_protocol.c"
-        "capture.c"
+        "acquisition.c"
         "transmit.c"
         "usb_transport.c"
         "device_log.c"
@@ -16,6 +16,7 @@ idf_component_register(
         tuss4470
         edge_capture
         tinyframe
+        esp_adc
         esp_driver_spi
         esp_driver_usb_serial_jtag
         esp_timer

@@ -20,14 +20,14 @@ void TF_WriteImpl(TinyFrame *tf, const uint8_t *data, uint32_t length)
     written_length += length;
 }
 
-static uint32_t sample_edges[] = {100, 200, 300, 400};
-static const edge_trace_t sample_trace = {.duration_ticks = 1000, .edge_count = 4, .edge_capacity = 4, .edges = sample_edges};
+static const uint16_t sample_millivolts[] = {1234, 3300};
+static const edge_t sample_edges[] = {{1000, true}, {1100, false}, {1300, true}};
 
 static void encodes_device_info(void)
 {
     uint8_t out[32];
-    tf_protocol_device_info_t info = {.name = "Dev", .tick_hz = 1000000, .max_edges = 1023};
-    const uint8_t expected[] = {5, 0x40, 0x42, 0x0F, 0x00, 0xFF, 0x03, 'D', 'e', 'v'};
+    tf_protocol_device_info_t info = {.name = "Dev", .vout_rate_hz = 20000, .edge_clock_hz = 10000000};
+    const uint8_t expected[] = {6, 0x20, 0x4E, 0, 0, 0x80, 0x96, 0x98, 0, 'D', 'e', 'v'};
     CHECK(tf_protocol_encode_device_info(&info, out, sizeof(out)) == sizeof(expected));
     CHECK(memcmp(out, expected, sizeof(expected)) == 0);
     CHECK(tf_protocol_encode_device_info(&info, out, sizeof(expected) - 1) == 0);
@@ -35,18 +35,41 @@ static void encodes_device_info(void)
     CHECK(tf_protocol_encode_device_info(&info, out, sizeof(out)) == 0);
 }
 
-static void encodes_capture(void)
+static void encodes_vout(void)
 {
-    uint8_t out[64];
-    const uint8_t expected[] = {
-        0, 0, 0xE8, 0x03, 0, 0, 4, 0,
-        100, 0, 0, 0, 200, 0, 0, 0, 0x2C, 0x01, 0, 0, 0x90, 0x01, 0, 0,
-    };
-    CHECK(tf_protocol_encode_capture(&sample_trace, out, sizeof(out)) == sizeof(expected));
+    uint8_t out[16];
+    const uint8_t expected[] = {0xE8, 0x03, 0, 0, 0, 0, 0, 0, 2, 0, 0xD2, 0x04, 0xE4, 0x0C};
+    CHECK(tf_protocol_encode_vout(1000, sample_millivolts, 2, out, sizeof(out)) == sizeof(expected));
     CHECK(memcmp(out, expected, sizeof(expected)) == 0);
-    CHECK(tf_protocol_encode_capture(&sample_trace, out, sizeof(expected) - 1) == 0);
-    edge_trace_t empty = {.duration_ticks = 0};
-    CHECK(tf_protocol_encode_capture(&empty, out, sizeof(out)) == 0);
+    CHECK(tf_protocol_encode_vout(1000, sample_millivolts, 2, out, sizeof(expected) - 1) == 0);
+    CHECK(tf_protocol_encode_vout(-1, sample_millivolts, 2, out, sizeof(out)) == 0);
+    CHECK(tf_protocol_encode_vout(1000, sample_millivolts, 0, out, sizeof(out)) == 0);
+}
+
+static void encodes_edges_as_tick_intervals(void)
+{
+    uint8_t out[32];
+    size_t encoded;
+    const uint8_t expected[] = {0xE8, 0x03, 0, 0, 0, 0, 0, 0, 1, 3, 0, 1, 0, 2, 0};
+    CHECK(tf_protocol_encode_edges(sample_edges, 3, 100, out, sizeof(out), &encoded) == sizeof(expected));
+    CHECK(encoded == 3);
+    CHECK(memcmp(out, expected, sizeof(expected)) == 0);
+
+    CHECK(tf_protocol_encode_edges(sample_edges, 3, 100, out, TF_PROTOCOL_EDGES_SIZE(2), &encoded) == TF_PROTOCOL_EDGES_SIZE(2));
+    CHECK(encoded == 2);
+}
+
+static void starts_a_new_run_where_edges_cannot_continue(void)
+{
+    uint8_t out[32];
+    size_t encoded;
+    const edge_t same_level[] = {{0, true}, {100, true}};
+    const edge_t off_tick[] = {{0, true}, {150, false}};
+    const edge_t too_far[] = {{0, true}, {100LL * 65536, false}};
+    CHECK(tf_protocol_encode_edges(same_level, 2, 100, out, sizeof(out), &encoded) == TF_PROTOCOL_EDGES_SIZE(1) && encoded == 1);
+    CHECK(tf_protocol_encode_edges(off_tick, 2, 100, out, sizeof(out), &encoded) == TF_PROTOCOL_EDGES_SIZE(1) && encoded == 1);
+    CHECK(tf_protocol_encode_edges(too_far, 2, 100, out, sizeof(out), &encoded) == TF_PROTOCOL_EDGES_SIZE(1) && encoded == 1);
+    CHECK(tf_protocol_encode_edges(sample_edges, 3, 100, out, TF_PROTOCOL_EDGES_SIZE(1) - 1, &encoded) == 0 && encoded == 0);
 }
 
 static void decodes_tone(void)
@@ -65,7 +88,7 @@ static void print_frame(void)
     written_length = 0;
 }
 
-/* Frames as the firmware sends them: responses echo request IDs, log events use device IDs. */
+/* Frames as the firmware sends them: responses echo request IDs, events use device IDs. */
 static void print_frames(void)
 {
     TinyFrame framing;
@@ -73,21 +96,25 @@ static void print_frames(void)
     TF_InitStatic(&framing, TF_MASTER);
     TF_InitStatic(&log_framing, TF_MASTER);
 
-    uint8_t payload[TF_PROTOCOL_CAPTURE_SIZE(4)];
-    size_t length = tf_protocol_encode_capture(&sample_trace, payload, sizeof(payload));
-    TF_Msg capture = {.type = TF_PROTOCOL_MSG_CAPTURE, .frame_id = 5, .data = payload, .len = (TF_LEN)length};
-    TF_Respond(&framing, &capture);
+    uint8_t result = TF_PROTOCOL_RESULT_OK;
+    TF_Msg started = {.type = TF_PROTOCOL_MSG_STREAM_START, .frame_id = 5, .data = &result, .len = 1};
+    TF_Respond(&framing, &started);
     print_frame();
 
-    uint8_t result = TF_PROTOCOL_RESULT_CANCELLED;
-    TF_Msg cancelled = {.type = TF_PROTOCOL_MSG_CAPTURE, .frame_id = 0x7FFF, .data = &result, .len = 1};
-    TF_Respond(&framing, &cancelled);
+    uint8_t payload[64];
+    size_t encoded;
+    size_t length = tf_protocol_encode_vout(1000, sample_millivolts, 2, payload, sizeof(payload));
+    TF_SendSimple(&framing, TF_PROTOCOL_MSG_VOUT_SAMPLES, payload, (TF_LEN)length);
+    print_frame();
+    length = tf_protocol_encode_edges(sample_edges, 3, 100, payload, sizeof(payload), &encoded);
+    TF_SendSimple(&framing, TF_PROTOCOL_MSG_OUT3_EDGES, payload, (TF_LEN)length);
+    print_frame();
+    result = TF_PROTOCOL_RESULT_OVERFLOW;
+    TF_SendSimple(&framing, TF_PROTOCOL_MSG_STREAM_END, &result, 1);
     print_frame();
 
     char text[TF_PROTOCOL_LOG_MAX_LENGTH];
     memset(text, 'x', sizeof(text));
-    TF_SendSimple(&log_framing, TF_PROTOCOL_MSG_LOG, (const uint8_t *)"hello\n", 6);
-    print_frame();
     TF_SendSimple(&log_framing, TF_PROTOCOL_MSG_LOG, (const uint8_t *)text, sizeof(text));
     print_frame();
 }
@@ -99,7 +126,9 @@ int main(int argc, char **argv)
         return 0;
     }
     encodes_device_info();
-    encodes_capture();
+    encodes_vout();
+    encodes_edges_as_tick_intervals();
+    starts_a_new_run_where_edges_cannot_continue();
     decodes_tone();
     return 0;
 }

@@ -1,49 +1,122 @@
 # esp-underwater-modem-firmware
 
-## Protocol
+ESP32-C3 firmware for a TUSS4470-based ultrasonic underwater modem, and a
+desktop GUI (`tools/ultrasound-gui`) for measuring the received signal (VOUT
+envelope and OUT3 zero crossings) and transmitting tone bursts.
 
-Protocol version: **5**. TinyFrame uses SOF `0x01`, 16-bit frame IDs, 16-bit
+## Architecture
+
+The firmware is a single loop: `app_main` initializes the hardware and then
+calls `usb_interface_poll()` forever. There are no application tasks; interrupt
+callbacks only buffer RMT and ADC data, which the loop forwards to the host.
+
+| Path | Responsibility |
+|---|---|
+| `components/tuss4470` | TUSS4470 chip driver: SPI registers, VDRV, tone bursts on IO1/IO2 |
+| `components/edge_capture` | Chip-independent, gapless RMT edge recorder for one digital input |
+| `components/tinyframe` | Project framing configuration for the vendored `third_party/tinyframe` |
+| `main/main.c` | Initialization and the main loop |
+| `main/board.*` | Pin assignment and hardware bring-up |
+| `main/usb_interface.*` | USB interface to the host: command table, responses, stream and log forwarding |
+| `main/tf_protocol.*` | Payload encoding and decoding for the USB interface |
+| `main/acquisition.*` | VOUT sampling (ADC, divider-corrected) and OUT3 edges on one time base |
+| `main/transmit.*` | Tone burst with VDRV powered only for its duration |
+| `main/usb_transport.*`, `main/device_log.*` | USB byte transport; ESP log capture |
+
+A new host command is one handler function plus one row in the command table
+in `usb_interface.c`. Payload encoding, SPI frame encoding and RMT decoding have no
+ESP-IDF dependencies and are unit tested on the host.
+
+## Development
+
+Firmware (ESP-IDF 6.0.1, ESP32-C3):
+
+```powershell
+idf.py build flash
+```
+
+`sdkconfig.defaults` keeps the console on UART, because USB Serial/JTAG carries
+the TinyFrame interface. An existing `sdkconfig` must also disable the secondary USB console.
+
+Host tests for the firmware (any C11 compiler with CMake; on Windows run from a
+Visual Studio developer prompt):
+
+```powershell
+cmake -S test/host -B build/host -G Ninja
+cmake --build build/host
+ctest --test-dir build/host --output-on-failure
+```
+
+GUI (Python 3.10+ with Tk):
+
+```powershell
+python -m pip install -r tools/ultrasound-gui/requirements.txt
+python tools/ultrasound-gui/src/main.py
+python -m unittest discover -s tools/ultrasound-gui/tests -t tools/ultrasound-gui/tests
+```
+
+The GUI's interoperability test decodes frames produced by the C host test
+build in `build/host` and is skipped when that build is missing.
+
+## USB interface protocol
+
+The development interface between the firmware and the GUI over USB, not the
+acoustic modem protocol.
+
+Protocol version: **6**. TinyFrame uses SOF `0x01`, 16-bit frame IDs, 16-bit
 payload lengths, 8-bit message types and CRC32. Payload integers are little endian.
-Host request IDs use `0x0000` through `0x7FFF`. Every response echoes its request's type
-and frame ID.
+Host request IDs use `0x0000` through `0x7FFF`; every response echoes its
+request's type and frame ID. Device events use frame IDs `0x8000` through
+`0xFFFF`, wrapping within that range, and need no response.
 
-| Message | Type | Request payload | Response payload |
+| Message | Type | Request payload | Response or event payload |
 |---|---:|---|---|
-| GET_DEVICE_INFO | `0x01` | Empty | `uint8 version`, `uint32 tick_hz`, `uint16 max_edges`, UTF-8 device name (remaining bytes, no terminator) |
-| CAPTURE | `0x02` | Empty | Complete OUT3 capture below, or one `uint8 result` on failure |
-| STOP | `0x03` | Empty | `uint8 result` |
-| TRANSMIT | `0x04` | `uint32 frequency_hz`, `uint16 cycles` | `uint8 result`, returned after completion or failure |
-| LOG | `0x05` | None (device event) | 1–255 bytes of formatted UTF-8 log text, no terminator |
+| GET_DEVICE_INFO | `0x01` | Empty | `uint8 version`, `uint32 vout_rate_hz`, `uint32 edge_clock_hz`, UTF-8 device name (remaining bytes) |
+| STREAM_START | `0x02` | Empty | `uint8 result` |
+| STREAM_STOP | `0x03` | Empty | `uint8 result` |
+| TRANSMIT | `0x04` | `uint32 frequency_hz`, `uint16 cycles` | `uint8 result`, after the burst |
+| LOG | `0x05` | Device event | 1–255 bytes of formatted UTF-8 log text |
+| VOUT_SAMPLES | `0x06` | Device event | See below |
+| OUT3_EDGES | `0x07` | Device event | See below |
+| STREAM_END | `0x08` | Device event | `uint8 result`: why the device ended the stream |
 
-GET_DEVICE_INFO is read-only. CAPTURE returns one independent trace. Only one
-capture may be pending. STOP cancels a pending capture, returning its cancelled
-CAPTURE response before the STOP response. There are no separate ACK, DATA or
-completion messages.
+While streaming, the device sends VOUT_SAMPLES and OUT3_EDGES as data becomes
+available. All stream times are nanoseconds since STREAM_START on the device
+clock, so VOUT and OUT3 share one time base. Stream data is never dropped
+silently: if the device falls behind, it ends the stream with STREAM_END
+(result 3). STREAM_START while streaming and STREAM_STOP while stopped succeed
+without effect.
 
-TRANSMIT sends one finite tone burst: 40000 to 1000000 Hz, 1 to 255 cycles.
-Frequency is rounded to the nearest supported half-period on the device clock.
-The host waits for the TRANSMIT response before sending another transmission.
-Capture and transmission may run concurrently. STOP applies only to capture.
+LOG events start after GET_DEVICE_INFO. A log frame need not be a complete
+line; logs may be truncated or dropped when buffers are full.
 
-LOG events begin after GET_DEVICE_INFO. They use device-generated frame IDs
-`0x8000` through `0xFFFF`, wrapping within that range, and require no response.
-Text includes the device's log formatting and line breaks; a frame need not be
-a complete line. Logs may be truncated or dropped when buffers are full.
+TRANSMIT sends one tone burst: 40000 to 1000000 Hz, 1 to 255 cycles. The
+frequency is rounded to the nearest half-period of the 20 MHz burst clock. The
+host waits for the response before sending another transmission. Transmitting
+does not interrupt streaming.
 
-### CAPTURE response
+### VOUT_SAMPLES
 
 | Offset | Field | Type |
 |---:|---|---|
-| 0 | Result: `0` | `uint8` |
-| 1 | Initial OUT3 level: `0` or `1` | `uint8` |
-| 2 | Capture duration, ticks | `uint32` |
-| 6 | Edge count | `uint16` |
-| 8 | Edge offsets from capture start, ticks | `uint32[edge_count]` |
+| 0 | Time of the first sample, ns | `uint64` |
+| 8 | Sample count `n`, at least 1 | `uint16` |
+| 10 | VOUT in millivolts | `uint16[n]` |
 
-Each edge toggles the level. Offsets are strictly increasing, greater than zero
-and less than the duration. A trace with zero edges has a constant level.
-Time in seconds is ticks divided by `tick_hz`. Captures have independent time
-origins; they do not form a continuous stream.
+Samples are consecutive at `vout_rate_hz`.
+
+### OUT3_EDGES
+
+| Offset | Field | Type |
+|---:|---|---|
+| 0 | Time of the first edge, ns | `uint64` |
+| 8 | Level after the first edge: `0` or `1` | `uint8` |
+| 9 | Edge count `n`, at least 1 | `uint16` |
+| 11 | Intervals between consecutive edges, in ticks of `edge_clock_hz` | `uint16[n - 1]` |
+
+Edges alternate in level. The first edge of each received signal segment is
+timestamped by an interrupt (about 1 µs); edges within a segment are exact to
+one tick.
 
 ### Results
 
@@ -51,11 +124,9 @@ origins; they do not form a continuous stream.
 |---:|---|
 | `0` | Success |
 | `1` | Invalid request |
-| `2` | Device busy |
-| `3` | Operation timed out |
-| `4` | Capture cancelled |
-| `5` | Capture buffer overflow |
-| `6` | Device error |
+| `2` | Operation timed out |
+| `3` | Data lost: device buffer overflow |
+| `4` | Device error |
 
 ## Transducers
 

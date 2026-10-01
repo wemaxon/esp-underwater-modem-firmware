@@ -1,151 +1,145 @@
+from struct import pack
 import unittest
 
-import support
 from support import wait_until
-from ultrasound_gui.model import ToneBurst
-from ultrasound_gui.tf_protocol import BUSY, CAPTURE, OVERFLOW, TIMEOUT, TRANSMIT, Packet
+from ultrasound_gui.model import EdgeBlock, ToneBurst, VoutBlock
 from ultrasound_gui.session import AcquisitionState, ConnectionState, Session
 from ultrasound_gui.simulator import SimulatedDevice
+from ultrasound_gui.tf_protocol import DEVICE_ERROR, OVERFLOW, STREAM_END, TRANSMIT, VOUT_SAMPLES, Packet
 
 
 class ScriptedDevice(SimulatedDevice):
-    """Simulator whose capture and transmit replies can be replaced."""
+    """Simulator with optional scripted replies."""
 
-    def __init__(self, capture_results=(), transmit_result=None, silent_capture=False):
+    def __init__(self, transmit_result=None, silent_stream_start=False, end_stream_with=None):
         super().__init__()
-        self.capture_results = list(capture_results)
         self.transmit_result = transmit_result
-        self.silent_capture = silent_capture
-        self.captures_requested = 0
+        self.silent_stream_start = silent_stream_start
+        self.end_stream_with = end_stream_with
 
-    def _capture(self, packet):
-        self.captures_requested += 1
-        if self.capture_results:
-            self.outbox.append(Packet(CAPTURE, packet.frame_id, bytes([self.capture_results.pop(0)])))
-        else:
-            super()._capture(packet)
-            if self.silent_capture:
-                self.capture_ready_at = float("inf")
+    def _stream_start(self, packet):
+        if self.silent_stream_start:
+            return
+        super()._stream_start(packet)
+        if self.end_stream_with is not None:
+            self.stream_start = None
+            self._event(STREAM_END, bytes([self.end_stream_with]))
 
     def _transmit(self, packet):
         if self.transmit_result is None:
             super()._transmit(packet)
         else:
-            self.outbox.append(Packet(TRANSMIT, packet.frame_id, bytes([self.transmit_result])))
+            self._respond(packet, bytes([self.transmit_result]))
+
+
+class LeftoverStreamDevice(SimulatedDevice):
+    """Still streaming from a previous session when the host connects."""
+
+    def __init__(self):
+        super().__init__()
+        self._event(VOUT_SAMPLES, pack("<QHH", 0, 1, 100))
 
 
 class SessionTests(unittest.TestCase):
-    def open(self, device=None, timeout=3.0):
+    def connect(self, device=None, timeout=3.0):
         device = device or SimulatedDevice()
         session = Session(lambda: device, timeout=timeout)
         session.open()
         self.addCleanup(self.close, session)
-        return session, device
+        wait_until(lambda: session.status.connection == ConnectionState.CONNECTED)
+        return session
 
     def close(self, session):
         session.close()
         session.thread.join(2)
         self.assertFalse(session.thread.is_alive())
 
-    def connect(self, device=None, timeout=3.0):
-        session, device = self.open(device, timeout)
-        wait_until(lambda: session.status.connection == ConnectionState.CONNECTED)
-        return session, device
-
     def test_connects_and_forwards_device_logs(self):
-        session, _ = self.connect()
+        session = self.connect()
         self.assertEqual(session.status.device_name, SimulatedDevice.NAME)
         wait_until(lambda: session.logs.qsize() > 0)
         self.assertIn("Device connected", "".join(session.take_logs()))
 
-    def test_single_capture_completes(self):
-        session, device = self.connect()
-        session.start_acquisition(False)
-        wait_until(lambda: session.status.acquisition == AcquisitionState.COMPLETE)
-        self.assertEqual(session.status.captures_received, 1)
-        self.assertEqual(len(session.frames.take().edges), 66)
-        self.assertEqual(device.capture_request, None)
-
-    def test_continuous_capture_repeats_until_stopped(self):
-        session, _ = self.connect()
-        session.start_acquisition(True)
-        wait_until(lambda: session.status.captures_received >= 2)
-        session.stop_acquisition()
+    def test_stream_delivers_vout_and_out3_until_stopped(self):
+        session = self.connect()
+        session.start_stream()
+        wait_until(lambda: session.status.acquisition == AcquisitionState.STREAMING)
+        blocks = []
+        wait_until(lambda: blocks.extend(session.take_blocks()) or
+                   {type(block) for block in blocks} == {VoutBlock, EdgeBlock}, timeout=3)
+        session.stop_stream()
         wait_until(lambda: session.status.acquisition == AcquisitionState.STOPPED)
         self.assertEqual(session.status.error, "")
         self.assertEqual(session.status.connection, ConnectionState.CONNECTED)
 
-    def test_stop_cancels_pending_capture(self):
-        session, device = self.connect(ScriptedDevice(silent_capture=True))
-        session.start_acquisition(False)
-        wait_until(lambda: session.status.acquisition == AcquisitionState.CAPTURING)
-        session.stop_acquisition()
-        wait_until(lambda: session.status.acquisition == AcquisitionState.STOPPED)
-        self.assertEqual(session.status.error, "")
-
-    def test_continuous_capture_rearms_after_device_timeout(self):
-        session, device = self.connect(ScriptedDevice(capture_results=[TIMEOUT]))
-        session.start_acquisition(True)
-        wait_until(lambda: session.status.captures_received >= 1)
-        self.assertGreaterEqual(device.captures_requested, 2)
-        self.assertEqual(session.status.error, "")
-
-    def test_capture_failure_is_reported_without_disconnecting(self):
-        session, _ = self.connect(ScriptedDevice(capture_results=[OVERFLOW]))
-        session.start_acquisition(True)
+    def test_device_ending_the_stream_is_reported(self):
+        session = self.connect(ScriptedDevice(end_stream_with=OVERFLOW))
+        session.start_stream()
         wait_until(lambda: session.status.error != "")
-        self.assertEqual(session.status.error, "Capture buffer overflow")
+        self.assertIn("buffer overflow", session.status.error)
         self.assertEqual(session.status.acquisition, AcquisitionState.STOPPED)
         self.assertEqual(session.status.connection, ConnectionState.CONNECTED)
 
-    def test_transmit_during_continuous_capture(self):
-        session, _ = self.connect()
-        session.start_acquisition(True)
+    def test_leftover_stream_data_is_ignored_while_connecting(self):
+        session = self.connect(LeftoverStreamDevice())
+        self.assertEqual(session.take_blocks(), [])
+        self.assertEqual(session.status.error, "")
+
+    def test_transmit_during_stream(self):
+        session = self.connect()
+        session.start_stream()
         session.transmit(ToneBurst())
         wait_until(lambda: session.status.transmit_message == "Complete")
-        wait_until(lambda: session.status.captures_received >= 2)
-        self.assertEqual(session.status.acquisition, AcquisitionState.CAPTURING)
+        self.assertEqual(session.status.acquisition, AcquisitionState.STREAMING)
 
-    def test_transmit_rejection_keeps_connection(self):
-        session, _ = self.connect(ScriptedDevice(transmit_result=BUSY))
+    def test_transmit_failure_keeps_connection(self):
+        session = self.connect(ScriptedDevice(transmit_result=DEVICE_ERROR))
         session.transmit(ToneBurst())
-        wait_until(lambda: session.status.transmit_message == "Device busy")
+        wait_until(lambda: session.status.transmit_message == "Device error")
         self.assertFalse(session.status.transmitting)
         self.assertEqual(session.status.connection, ConnectionState.CONNECTED)
 
+    def test_close_stops_the_stream(self):
+        device = SimulatedDevice()
+        session = self.connect(device)
+        session.start_stream()
+        wait_until(lambda: session.status.acquisition == AcquisitionState.STREAMING)
+        session.close()
+        self.assertTrue(session.done.wait(1))
+        self.assertIsNone(device.stream_start)
+        self.assertEqual(session.status.error, "")
+
     def test_close_waits_for_transmission(self):
-        session, _ = self.connect()
+        session = self.connect()
         session.transmit(ToneBurst())
         wait_until(lambda: session.status.transmitting)
         session.close()
         self.assertTrue(session.done.wait(1))
         self.assertEqual(session.status.transmit_message, "Complete")
-        self.assertEqual(session.status.connection, ConnectionState.DISCONNECTED)
-
-    def test_close_stops_pending_capture(self):
-        session, device = self.connect(ScriptedDevice(silent_capture=True))
-        session.start_acquisition(True)
-        wait_until(lambda: session.status.acquisition == AcquisitionState.CAPTURING)
-        session.close()
-        self.assertTrue(session.done.wait(1))
-        self.assertEqual(session.status.error, "")
 
     def test_unanswered_request_disconnects_with_error(self):
-        session, _ = self.connect(ScriptedDevice(silent_capture=True), timeout=0.2)
-        session.start_acquisition(False)
+        session = self.connect(ScriptedDevice(silent_stream_start=True), timeout=0.2)
+        session.start_stream()
         self.assertTrue(session.done.wait(2))
         self.assertEqual(session.status.connection, ConnectionState.DISCONNECTED)
         self.assertEqual(session.status.error, "Device response timed out")
 
     def test_commands_before_connection_are_ignored(self):
         session = Session(SimulatedDevice)
-        session.start_acquisition(False)
+        session.start_stream()
         session.transmit(ToneBurst())
         session.open()
         self.addCleanup(self.close, session)
         wait_until(lambda: session.status.connection == ConnectionState.CONNECTED)
         self.assertEqual(session.status.acquisition, AcquisitionState.STOPPED)
         self.assertFalse(session.status.transmitting)
+
+    def test_events_need_a_device_frame_id(self):
+        session = Session(SimulatedDevice)
+        with self.assertRaises(ValueError):
+            session._receive(Packet(STREAM_END, 7, b"\x00"))
+        with self.assertRaises(ValueError):
+            session._receive(Packet(TRANSMIT, 7, b"\x00"))     # response nobody asked for
 
 
 if __name__ == "__main__":

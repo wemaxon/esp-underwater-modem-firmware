@@ -2,6 +2,7 @@ from dataclasses import replace
 import tkinter as tk
 from tkinter import ttk
 
+from ..model import StreamHistory
 from ..transport import discover_devices, open_device
 from ..session import AcquisitionState, ConnectionState, Session, SessionStatus
 from .controls import AcquisitionControls, ConnectionBar, TransmitControls
@@ -22,6 +23,7 @@ class Application(tk.Tk):
         self.session = None
         self.status = SessionStatus()
         self.closing = False
+        self.history = StreamHistory(span_s=AcquisitionControls.MAX_WINDOW_MS / 1000)
         self.message = tk.StringVar()
         self.rowconfigure(1, weight=1)
         self.columnconfigure(0, weight=1)
@@ -70,7 +72,7 @@ class Application(tk.Tk):
         self.connection.set_status(status)
         self.acquisition.set_status(status)
         self.transmission.set_status(status)
-        self.message.set(status.error or f"{status.device_name} | {status.captures_received} captures received")
+        self.message.set(status.error or status.device_name)
         self.footer.configure(foreground="#b33b35" if status.error else "")
 
     def connect(self):
@@ -94,24 +96,24 @@ class Application(tk.Tk):
             self.message.set(str(exc))
             self.footer.configure(foreground="#b33b35")
             return False
+        self.plot.show(self.history)
         self.render_status(self.status)
         return True
 
     def run_acquisition(self):
         if self.closing or self.session is None or self.status.connection != ConnectionState.CONNECTED:
             return
-        if self.status.acquisition not in (AcquisitionState.STOPPED, AcquisitionState.COMPLETE):
+        if self.status.acquisition != AcquisitionState.STOPPED or not self.update_graph_window():
             return
-        if not self.update_graph_window():
-            return
-        self.plot.clear()
+        self.history.clear()
+        self.plot.reset()
         self.render_status(replace(self.status, acquisition=AcquisitionState.STARTING))
-        self.session.start_acquisition(self.acquisition.mode.get() == "Continuous")
+        self.session.start_stream()
 
     def stop_acquisition(self):
         if self.session is not None:
             self.render_status(replace(self.status, acquisition=AcquisitionState.STOPPING))
-            self.session.stop_acquisition()
+            self.session.stop_stream()
 
     def transmit(self):
         if self.closing or self.session is None or self.status.connection != ConnectionState.CONNECTED or self.status.transmitting:
@@ -129,9 +131,11 @@ class Application(tk.Tk):
         status = self.session.statuses.take()
         if status is not None:
             self.render_status(status)
-        frame = self.session.frames.take()
-        if frame is not None:
-            self.plot.show(frame)
+        blocks = self.session.take_blocks()
+        for block in blocks:
+            self.history.add(block)
+        if blocks:
+            self.plot.show(self.history)
 
     def poll(self):
         if self.session is not None:
