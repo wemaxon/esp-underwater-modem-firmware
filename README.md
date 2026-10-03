@@ -65,12 +65,30 @@ level (with 50 mV hysteresis), or until *Force trigger* is pressed, then holds
 the window around the trigger, including the pre-trigger time, and stops the
 stream. Times in a held capture are relative to the trigger.
 
+The **Modem** tab sends a message as one BFSK frame and decodes frames from the
+stream. Use one GUI instance per board: one sends, the other streams and
+decodes. A 1 is sent at centre + shift, a 0 at centre - shift; the receiver
+measures the OUT3 frequency between zero crossings. The frame, also the basis
+for later modulations (`tools/ultrasound-gui/src/ultrasound_gui/modem`), is:
+
+| Field | Bits |
+|---|---:|
+| Preamble, alternating 1 0 | adjustable, even |
+| Sync word `0x2DD4` | 16 |
+| Payload length in bytes, up to the adjustable maximum | 8 |
+| Payload | 8 × length |
+| CRC-16/CCITT-FALSE over length and payload | 16 |
+
+Longer symbols carry over longer distances at a lower bit rate. Decoded frames
+show their CRC status and sync quality. The simulator ("Demo") receives what it
+transmits, so the modem can be tried without hardware.
+
 ## USB interface protocol
 
 The development interface between the firmware and the GUI over USB, not the
 acoustic modem protocol.
 
-Protocol version: **8**. TinyFrame uses SOF `0x01`, 16-bit frame IDs, 16-bit
+Protocol version: **9**. TinyFrame uses SOF `0x01`, 16-bit frame IDs, 16-bit
 payload lengths, 8-bit message types and CRC32. Payload integers are little endian.
 Host request IDs use `0x0000` through `0x7FFF`; every response echoes its
 request's type and frame ID. Device events use frame IDs `0x8000` through
@@ -78,10 +96,10 @@ request's type and frame ID. Device events use frame IDs `0x8000` through
 
 | Message | Type | Request payload | Response or event payload |
 |---|---:|---|---|
-| GET_DEVICE_INFO | `0x01` | Empty | `uint8 version`, `uint32 vout_rate_hz`, `uint32 edge_clock_hz`, UTF-8 device name (remaining bytes) |
+| GET_DEVICE_INFO | `0x01` | Empty | `uint8 version`, `uint32 vout_rate_hz`, `uint32 edge_clock_hz`, `uint32 transmit_clock_hz`, UTF-8 device name (remaining bytes) |
 | STREAM_START | `0x02` | Empty | `uint8 result` |
 | STREAM_STOP | `0x03` | Empty | `uint8 result` |
-| TRANSMIT | `0x04` | `uint32 frequency_hz`, `uint16 cycles` | `uint8 result`, after the burst |
+| TRANSMIT | `0x04` | Waveform: 1–512 tones of `uint32 frequency_hz`, `uint32 cycles` | `uint8 result`, after the transmission |
 | LOG | `0x05` | Device event | 1–255 bytes of formatted UTF-8 log text |
 | VOUT_SAMPLES | `0x06` | Device event | See below |
 | OUT3_EDGES | `0x07` | Device event | See below |
@@ -99,9 +117,13 @@ without effect.
 LOG events start after GET_DEVICE_INFO. A log frame need not be a complete
 line; logs may be truncated or dropped when buffers are full.
 
-TRANSMIT sends one tone burst: 40000 to 1000000 Hz, 1 to 255 cycles. The
-frequency is rounded to the nearest half-period of the 20 MHz burst clock. The
-host waits for the response before sending another transmission. Transmitting
+TRANSMIT plays a waveform: its tones back to back with continuous phase, each
+10000 to 1000000 Hz and at least one cycle. Each frequency is rounded to whole
+half periods of the transmit clock (`transmit_clock_hz`), so a modulator that
+needs exact symbol timing computes its cycle counts from the rounded
+frequencies. There is no silence within a waveform: the TUSS4470 ends a burst
+when IO2 stops toggling for 64 µs. The response comes once the waveform has
+been played; a TRANSMIT during a transmission returns Device busy. Transmitting
 does not interrupt streaming.
 
 ### CONFIG
@@ -153,6 +175,7 @@ one tick.
 | `2` | Operation timed out |
 | `3` | Data lost: device buffer overflow |
 | `4` | Device error |
+| `5` | Device busy |
 
 ## Transducers
 

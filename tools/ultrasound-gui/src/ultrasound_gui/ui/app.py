@@ -1,18 +1,23 @@
 from dataclasses import replace
+from time import monotonic
 import tkinter as tk
 from tkinter import ttk
 
 from ..model import StreamHistory
+from ..modem import bfsk, framing
+from ..tf_protocol import MAX_TONES
 from ..trigger import LevelTrigger, SingleShot
 from ..transport import discover_devices, open_device
 from ..session import AcquisitionState, ConnectionState, Session, SessionStatus
 from .controls import AcquisitionControls, ConfigurationControls, ConnectionBar, TransmitControls
+from .modem_controls import ModemControls
 from .plot import ScopePlot
 from .log_console import LogConsole
 
 
 class Application(tk.Tk):
     REFRESH_MS = 33
+    DECODE_INTERVAL_S = 0.25
 
     def __init__(self, discover=discover_devices, device_factory=open_device):
         super().__init__()
@@ -27,6 +32,8 @@ class Application(tk.Tk):
         self.history = StreamHistory(span_s=AcquisitionControls.MAX_WINDOW_MS / 1000)
         self.single = None          # single shot waiting for its trigger or window
         self.held_ns = None         # trigger time of the single shot on display
+        self.decode_from_ns = 0     # where the next frame search starts
+        self.next_decode = 0.0
         self.message = tk.StringVar()
         self.rowconfigure(1, weight=1)
         self.columnconfigure(0, weight=1)
@@ -51,6 +58,8 @@ class Application(tk.Tk):
         self.transmission.grid(row=1, column=0, sticky="ew", pady=(12, 0))
         self.configuration = ConfigurationControls(sidebar, self.apply_configuration)
         sidebar.add(self.configuration, text="Configuration", padding=(0, 8, 0, 0))
+        self.modem = ModemControls(sidebar, self.send_frame, self.update_history_span)
+        sidebar.add(self.modem, text="Modem", padding=(0, 8, 0, 0))
         self.console = LogConsole(panes)
         panes.add(self.console, weight=1)
         self.footer = ttk.Label(self, textvariable=self.message, padding=(10, 6), anchor="w")
@@ -82,6 +91,7 @@ class Application(tk.Tk):
         self.acquisition.set_status(status, self.single_state(), armed=self.single is not None and not self.single.triggered)
         self.configuration.set_status(status)
         self.transmission.set_status(status)
+        self.modem.set_status(status)
         self.message.set(status.error or status.device_name)
         self.footer.configure(foreground="#b33b35" if status.error else "")
 
@@ -132,6 +142,8 @@ class Application(tk.Tk):
         if self.status.acquisition != AcquisitionState.STOPPED or settings is None:
             return
         self.history.clear()
+        self.update_history_span()
+        self.decode_from_ns = 0
         self.held_ns = None
         self.single = None
         if settings.single:
@@ -169,6 +181,46 @@ class Application(tk.Tk):
                 return
         self.plot.show(self.history, self.history.latest_ns)
 
+    def update_history_span(self):
+        """Keeps enough of the stream for the plot window and the longest frame being decoded."""
+        try:
+            settings = self.modem.settings()
+        except ValueError:
+            return
+        frame_s = settings.frame_duration_s(settings.max_payload)
+        self.history.set_span(max(AcquisitionControls.MAX_WINDOW_MS / 1000, 2 * frame_s + 1))
+
+    def send_frame(self):
+        if self.closing or self.session is None or self.session.info is None or self.status.transmitting:
+            return
+        try:
+            settings = self.modem.settings()
+            payload = self.modem.payload()
+            if len(payload) > settings.max_payload:
+                raise ValueError(f"The message exceeds the maximum payload of {settings.max_payload} bytes")
+            bits = framing.frame_bits(payload, settings.preamble_bits)
+            tones = bfsk.modulate(bits, settings, self.session.info.transmit_clock_hz)
+            if len(tones) > MAX_TONES:
+                raise ValueError(f"The frame needs {len(tones)} tones; one transmission holds {MAX_TONES}")
+        except ValueError as exc:
+            self.modem.show_error(str(exc))
+            return
+        self.render_status(replace(self.status, transmitting=True, transmit_message="Transmitting"))
+        self.session.transmit(tones)
+
+    def decode_stream(self):
+        """Searches the stream for new frames, at most every DECODE_INTERVAL_S."""
+        if not self.modem.decoding.get() or monotonic() < self.next_decode or self.history.earliest_ns is None:
+            return
+        self.next_decode = monotonic() + self.DECODE_INTERVAL_S
+        try:
+            settings = self.modem.settings()
+        except ValueError:
+            return
+        start_ns = max(self.decode_from_ns, self.history.earliest_ns)
+        frames, self.decode_from_ns = bfsk.decode(self.history, settings, start_ns, self.history.latest_ns)
+        self.modem.add_frames(frames)
+
     def apply_configuration(self):
         if self.session is not None and self.configuration.device_config is not None:
             self.session.apply_config(self.configuration.edited_config())
@@ -177,12 +229,12 @@ class Application(tk.Tk):
         if self.closing or self.session is None or self.status.connection != ConnectionState.CONNECTED or self.status.transmitting:
             return
         try:
-            tone = self.transmission.settings()
+            tone = self.transmission.tone()
         except (ValueError, tk.TclError) as exc:
             self.transmission.state_text.set(str(exc))
             return
         self.render_status(replace(self.status, transmitting=True, transmit_message="Transmitting"))
-        self.session.transmit(tone)
+        self.session.transmit([tone])
 
     def drain_session(self):
         self.console.append(self.session.take_logs())
@@ -193,6 +245,7 @@ class Application(tk.Tk):
         for block in blocks:
             self.history.add(block)
         if blocks:
+            self.decode_stream()
             was_triggered = self.single is not None and self.single.triggered
             self.show_stream()
             if self.single is not None and self.single.triggered != was_triggered:

@@ -3,7 +3,7 @@ import unittest
 import numpy as np
 
 import support  # noqa: F401  (import path setup)
-from ultrasound_gui.model import EdgeBlock, StreamHistory, ToneBurst, VoutBlock
+from ultrasound_gui.model import EdgeBlock, StreamHistory, Tone, VoutBlock
 
 
 def edges(start_ns, count, interval_ns, first_level=True):
@@ -53,13 +53,17 @@ class StreamHistoryTests(unittest.TestCase):
             block.volts[0] = 1
 
 
-class ToneBurstTests(unittest.TestCase):
+class ToneTests(unittest.TestCase):
     def test_limits(self):
-        ToneBurst(40_000, 1)
-        ToneBurst(1_000_000, 255)
-        for frequency, cycles in ((39_999, 1), (1_000_001, 1), (40_000, 0), (40_000, 256), (40_000.0, 1)):
+        Tone(10_000, 1)
+        Tone(1_000_000, 2**32 - 1)
+        for frequency, cycles in ((9_999, 1), (1_000_001, 1), (40_000, 0), (40_000, 2**32), (40_000.0, 1)):
             with self.subTest(frequency=frequency, cycles=cycles), self.assertRaises(ValueError):
-                ToneBurst(frequency, cycles)
+                Tone(frequency, cycles)
+
+    def test_played_frequency_uses_whole_half_periods_of_the_transmit_clock(self):
+        self.assertEqual(Tone(40_000).played_hz(20_000_000), 40_000)
+        self.assertEqual(Tone(39_000).played_hz(20_000_000), 20_000_000 / 512)
 
 
 if __name__ == "__main__":

@@ -10,7 +10,7 @@ sys.path.insert(0, str(SOURCE))
 
 from ultrasound_gui.model import DeviceInfo  # noqa: E402
 
-INFO = DeviceInfo("Test", vout_rate_hz=20_000, edge_clock_hz=10_000_000)
+INFO = DeviceInfo("Test", vout_rate_hz=20_000, edge_clock_hz=10_000_000, transmit_clock_hz=20_000_000)
 
 
 def wait_until(predicate, timeout=2.0, message="Timed out waiting for condition"):

@@ -43,11 +43,10 @@ static void decodes_status_bits(void)
     CHECK(status.raw == 0x21);
     CHECK(status.state == 1);    /* burst */
     CHECK(status.vdrv_ready);
-    CHECK(!tuss4470_status_has_fault(&status));
+    CHECK(!status.pulse_count_fault && !status.driver_pulse_fault && !status.eeprom_crc_fault);
 
     status = tuss4470_status_from_bits(0x1C);
     CHECK(status.pulse_count_fault && status.driver_pulse_fault && status.eeprom_crc_fault);
-    CHECK(tuss4470_status_has_fault(&status));
 }
 
 int main(void)

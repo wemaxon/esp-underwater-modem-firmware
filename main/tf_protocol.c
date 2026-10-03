@@ -2,7 +2,7 @@
 
 #include <string.h>
 
-#define INFO_HEADER_SIZE 9U
+#define INFO_HEADER_SIZE 13U
 
 static void put_u16(uint8_t *out, uint16_t value)
 {
@@ -42,6 +42,7 @@ size_t tf_protocol_encode_device_info(const tf_protocol_device_info_t *info, uin
     out[0] = TF_PROTOCOL_VERSION;
     put_u32(out + 1, info->vout_rate_hz);
     put_u32(out + 5, info->edge_clock_hz);
+    put_u32(out + 9, info->transmit_clock_hz);
     memcpy(out + INFO_HEADER_SIZE, info->name, name_length);
     return length;
 }
@@ -106,7 +107,15 @@ size_t tf_protocol_encode_edges(const edge_t *edges, size_t count, uint32_t ns_p
     return TF_PROTOCOL_EDGES_SIZE(n);
 }
 
-tone_burst_t tf_protocol_decode_tone(const uint8_t *data)
+size_t tf_protocol_decode_waveform(const uint8_t *data, size_t length, tuss4470_tone_t *tones, size_t capacity)
 {
-    return (tone_burst_t){.frequency_hz = get_u32(data), .cycles = get_u16(data + 4)};
+    size_t count = length / TF_PROTOCOL_TONE_SIZE;
+    if (!count || length % TF_PROTOCOL_TONE_SIZE || count > capacity) {
+        return 0;
+    }
+    for (size_t i = 0; i < count; ++i) {
+        const uint8_t *tone = data + i * TF_PROTOCOL_TONE_SIZE;
+        tones[i] = (tuss4470_tone_t){.frequency_hz = get_u32(tone), .cycles = get_u32(tone + 4)};
+    }
+    return count;
 }

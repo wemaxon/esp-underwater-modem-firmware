@@ -3,7 +3,7 @@ import unittest
 
 from support import wait_until
 from ultrasound_gui.tuss_config import RECEIVER_SETTINGS, TRANSMITTER_SETTINGS
-from ultrasound_gui.model import EdgeBlock, ToneBurst, VoutBlock
+from ultrasound_gui.model import EdgeBlock, Tone, VoutBlock
 from ultrasound_gui.session import AcquisitionState, ConnectionState, Session
 from ultrasound_gui.simulator import SimulatedDevice
 from ultrasound_gui.tf_protocol import DEVICE_ERROR, OVERFLOW, STREAM_END, TRANSMIT, VOUT_SAMPLES, Packet
@@ -77,6 +77,7 @@ class SessionTests(unittest.TestCase):
         session = self.connect()
         session.start_stream()
         wait_until(lambda: session.status.acquisition == AcquisitionState.STREAMING)
+        session.transmit([Tone(40_000, 400)])        # the simulator receives what it transmits
         blocks = []
         wait_until(lambda: blocks.extend(session.take_blocks()) or
                    {type(block) for block in blocks} == {VoutBlock, EdgeBlock}, timeout=3)
@@ -101,13 +102,19 @@ class SessionTests(unittest.TestCase):
     def test_transmit_during_stream(self):
         session = self.connect()
         session.start_stream()
-        session.transmit(ToneBurst())
+        session.transmit([Tone()])
         wait_until(lambda: session.status.transmit_message == "Complete")
         self.assertEqual(session.status.acquisition, AcquisitionState.STREAMING)
 
+    def test_long_transmission_extends_the_response_timeout(self):
+        session = self.connect(timeout=0.3)
+        session.transmit([Tone(40_000, 40_000)])     # one second
+        wait_until(lambda: session.status.transmit_message == "Complete", timeout=3)
+        self.assertEqual(session.status.connection, ConnectionState.CONNECTED)
+
     def test_transmit_failure_keeps_connection(self):
         session = self.connect(ScriptedDevice(transmit_result=DEVICE_ERROR))
-        session.transmit(ToneBurst())
+        session.transmit([Tone()])
         wait_until(lambda: session.status.transmit_message == "Device error")
         self.assertFalse(session.status.transmitting)
         self.assertEqual(session.status.connection, ConnectionState.CONNECTED)
@@ -124,7 +131,7 @@ class SessionTests(unittest.TestCase):
 
     def test_close_waits_for_transmission(self):
         session = self.connect()
-        session.transmit(ToneBurst())
+        session.transmit([Tone()])
         wait_until(lambda: session.status.transmitting)
         session.close()
         self.assertTrue(session.done.wait(1))
@@ -140,7 +147,7 @@ class SessionTests(unittest.TestCase):
     def test_commands_before_connection_are_ignored(self):
         session = Session(SimulatedDevice)
         session.start_stream()
-        session.transmit(ToneBurst())
+        session.transmit([Tone()])
         session.open()
         self.addCleanup(self.close, session)
         wait_until(lambda: session.status.connection == ConnectionState.CONNECTED)

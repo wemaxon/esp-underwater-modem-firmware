@@ -1,18 +1,25 @@
 #pragma once
 
-#include <stdint.h>
+/*
+ * Transmits waveforms, with VDRV powered only while transmitting. Non-blocking:
+ * transmit_start() begins, transmit_poll() reports the outcome.
+ */
 
-typedef struct {
-    uint32_t frequency_hz;
-    uint16_t cycles;
-} tone_burst_t;
+#include <stdbool.h>
+#include <stddef.h>
+
+#include "tuss4470_waveform.h"
 
 typedef enum {
     TRANSMIT_OK,
+    TRANSMIT_PENDING,
     TRANSMIT_INVALID,
     TRANSMIT_TIMEOUT,
     TRANSMIT_ERROR,
 } transmit_status_t;
 
-/* Sends one tone burst and returns once it is complete. VDRV is powered only during the burst. */
-transmit_status_t transmit_send(const tone_burst_t *tone);
+/* Returns TRANSMIT_PENDING once started; tones must stay valid until the outcome is reported. */
+transmit_status_t transmit_start(const tuss4470_tone_t *tones, size_t count);
+/* TRANSMIT_PENDING while transmitting, then the outcome, once. */
+transmit_status_t transmit_poll(void);
+bool transmit_busy(void);

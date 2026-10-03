@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "tuss4470.c"
         "tuss4470_frame.c"
+        "tuss4470_waveform.c"
 
     INCLUDE_DIRS
         "include"

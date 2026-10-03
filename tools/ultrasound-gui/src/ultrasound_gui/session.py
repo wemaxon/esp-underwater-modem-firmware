@@ -11,12 +11,12 @@ from queue import Empty, Full, Queue
 from threading import Event, Lock, Thread
 from time import monotonic
 
-from .model import ToneBurst
+from .model import Tone
 from .tuss_config import TussConfig
 from .tf_protocol import (
     DEVICE_FRAME_ID, EVENTS, GET_CONFIG, GET_DEVICE_INFO, LOG, OK, OUT3_EDGES, RESULT_NAMES, SET_CONFIG,
     STREAM_END, STREAM_START, STREAM_STOP, TRANSMIT, VOUT_SAMPLES, Packet, ProtocolError, decode_config, decode_edges,
-    decode_info, decode_log, decode_result, decode_vout, encode_tone,
+    decode_info, decode_log, decode_result, decode_vout, encode_waveform,
 )
 
 
@@ -57,7 +57,7 @@ class StopStream:
 
 @dataclass(frozen=True)
 class Transmit:
-    tone: ToneBurst
+    tones: tuple[Tone, ...]
 
 
 @dataclass(frozen=True)
@@ -108,9 +108,10 @@ class Requests:
     def __bool__(self):
         return bool(self.pending)
 
-    def open(self, message_type, payload=b""):
+    def open(self, message_type, payload=b"", duration_s=0.0):
+        """duration_s is how long the device works on the request before it can respond."""
         self.last_id = (self.last_id + 1) % self.ID_LIMIT
-        self.pending[message_type] = (self.last_id, monotonic() + self.timeout)
+        self.pending[message_type] = (self.last_id, monotonic() + duration_s + self.timeout)
         return Packet(message_type, self.last_id, payload)
 
     def close(self, packet):
@@ -161,8 +162,9 @@ class Session:
     def stop_stream(self):
         self.commands.put(StopStream())
 
-    def transmit(self, tone: ToneBurst):
-        self.commands.put(Transmit(tone))
+    def transmit(self, tones: list[Tone]):
+        """Sends one waveform: the tones are played back to back."""
+        self.commands.put(Transmit(tuple(tones)))
 
     def apply_config(self, config: TussConfig):
         self.commands.put(ApplyConfig(config))
@@ -194,8 +196,8 @@ class Session:
         self.status = replace(self.status, **changes)
         self.statuses.put(self.status)
 
-    def _send(self, message_type, payload=b""):
-        self.device.send(self.requests.open(message_type, payload))
+    def _send(self, message_type, payload=b"", duration_s=0.0):
+        self.device.send(self.requests.open(message_type, payload, duration_s))
 
     def _run(self):
         self.statuses.put(self.status)
@@ -233,7 +235,7 @@ class Session:
             elif isinstance(command, StopStream):
                 self._stop_stream()
             elif isinstance(command, Transmit):
-                self._start_transmit(command.tone)
+                self._start_transmit(command.tones)
             elif isinstance(command, ApplyConfig):
                 self._apply_config(command.config)
 
@@ -247,10 +249,10 @@ class Session:
             self._status(acquisition=AcquisitionState.STOPPING)
             self._send(STREAM_STOP)
 
-    def _start_transmit(self, tone):
+    def _start_transmit(self, tones):
         if self.connected and not self.closing and TRANSMIT not in self.requests:
             self._status(transmitting=True, transmit_message="Transmitting")
-            self._send(TRANSMIT, encode_tone(tone))
+            self._send(TRANSMIT, encode_waveform(list(tones)), sum(tone.duration_s for tone in tones))
 
     def _apply_config(self, config):
         if self.connected and not self.closing and SET_CONFIG not in self.requests:

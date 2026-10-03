@@ -35,8 +35,3 @@ uint16_t tuss4470_frame_write(uint8_t address, uint8_t data);
 bool tuss4470_frame_parse_response(uint16_t frame, tuss4470_response_t *response);
 
 tuss4470_status_t tuss4470_status_from_bits(uint8_t status_bits);
-
-static inline bool tuss4470_status_has_fault(const tuss4470_status_t *status)
-{
-    return status->pulse_count_fault || status->driver_pulse_fault || status->eeprom_crc_fault;
-}

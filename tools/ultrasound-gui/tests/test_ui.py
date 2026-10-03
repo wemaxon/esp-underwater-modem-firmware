@@ -1,3 +1,4 @@
+import time
 import tkinter as tk
 import unittest
 
@@ -31,6 +32,7 @@ class ApplicationTests(unittest.TestCase):
         wait_until(lambda: self.pump() or self.app.status.connection == ConnectionState.CONNECTED)
         self.app.run_acquisition()
         wait_until(lambda: self.pump() or len(self.app.plot.vout_line.get_xdata()) > 0, timeout=3)
+        self.app.transmit()                         # the simulator receives what it transmits
         wait_until(lambda: self.pump() or len(self.app.plot.out3_line.get_xdata()) > 0, timeout=3)
         self.app.stop_acquisition()
         wait_until(lambda: self.pump() or self.app.status.acquisition == AcquisitionState.STOPPED)
@@ -49,6 +51,17 @@ class ApplicationTests(unittest.TestCase):
         self.assertEqual(choices["Zero-crossing hysteresis"].get(), "380 mV")
         self.assertEqual(choices["Output stage"].get(), "Half bridge")
 
+    def test_sent_frame_is_decoded(self):
+        self.app.connect()
+        wait_until(lambda: self.pump() or self.app.status.connection == ConnectionState.CONNECTED)
+        self.app.modem.fields["symbol_ms"][1].set("2")
+        self.app.modem.message.set("Hi there")
+        self.app.run_acquisition()
+        wait_until(lambda: self.pump() or self.app.status.acquisition == AcquisitionState.STREAMING)
+        self.app.send_frame()
+        wait_until(lambda: self.pump() or "Hi there" in self.app.modem.frames.get("1.0", "end"), timeout=5)
+        self.assertIn("OK", self.app.modem.frames.get("1.0", "end"))
+
     def test_single_shot_holds_the_triggered_window(self):
         self.app.connect()
         wait_until(lambda: self.pump() or self.app.status.connection == ConnectionState.CONNECTED)
@@ -57,6 +70,12 @@ class ApplicationTests(unittest.TestCase):
         self.app.acquisition.pre_trigger_ms.set("5")
         self.app.acquisition.trigger_v.set("1.0")
         self.app.run_acquisition()
+        wait_until(lambda: self.pump() or self.app.single_state() == "Waiting for trigger")
+        end = time.monotonic() + 0.1                 # collect the pre-trigger time first
+        while time.monotonic() < end:
+            self.pump()
+        self.app.transmission.cycles.set("800")
+        self.app.transmit()
         wait_until(lambda: self.pump() or self.app.held_ns is not None, timeout=3)
         wait_until(lambda: self.pump() or self.app.status.acquisition == AcquisitionState.STOPPED)
         self.assertEqual(self.app.acquisition.state_text.get(), "Captured")

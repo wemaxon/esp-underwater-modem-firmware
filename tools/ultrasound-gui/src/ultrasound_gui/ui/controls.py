@@ -3,7 +3,7 @@ from math import isfinite
 import tkinter as tk
 from tkinter import ttk
 
-from ..model import ToneBurst
+from ..model import Tone
 from ..session import AcquisitionState, ConnectionState, SessionStatus
 from ..tuss_config import RECEIVER_SETTINGS, TRANSMITTER_SETTINGS
 
@@ -169,17 +169,17 @@ class TransmitControls(ttk.LabelFrame):
         self.cycles = tk.StringVar(value="32")
         self.state_text = tk.StringVar(value="Idle")
         ttk.Label(self, text="Frequency (Hz)").grid(row=0, column=0, sticky="w")
-        self.frequency_input = ttk.Spinbox(self, textvariable=self.frequency_hz, from_=40000, to=1000000, increment=1000, width=18)
+        self.frequency_input = ttk.Spinbox(self, textvariable=self.frequency_hz, from_=Tone.MIN_HZ, to=Tone.MAX_HZ, increment=1000, width=18)
         self.frequency_input.grid(row=1, column=0, sticky="ew", pady=(2, 8))
         ttk.Label(self, text="Cycles").grid(row=2, column=0, sticky="w")
-        self.cycles_input = ttk.Spinbox(self, textvariable=self.cycles, from_=1, to=255, increment=1, width=18)
+        self.cycles_input = ttk.Spinbox(self, textvariable=self.cycles, from_=1, to=100000, increment=1, width=18)
         self.cycles_input.grid(row=3, column=0, sticky="ew", pady=(2, 8))
         self.transmit_button = ttk.Button(self, text="Transmit", command=transmit)
         self.transmit_button.grid(row=4, column=0, sticky="ew")
         ttk.Label(self, textvariable=self.state_text, wraplength=180).grid(row=5, column=0, sticky="w", pady=(8, 0))
 
-    def settings(self):
-        return ToneBurst(int(self.frequency_hz.get()), int(self.cycles.get()))
+    def tone(self):
+        return Tone(int(self.frequency_hz.get()), int(self.cycles.get()))
 
     def set_status(self, status: SessionStatus):
         self.state_text.set(status.transmit_message)

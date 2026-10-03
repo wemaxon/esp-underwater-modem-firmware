@@ -26,8 +26,8 @@ static const edge_t sample_edges[] = {{1000, true}, {1100, false}, {1300, true}}
 static void encodes_device_info(void)
 {
     uint8_t out[32];
-    tf_protocol_device_info_t info = {.name = "Dev", .vout_rate_hz = 20000, .edge_clock_hz = 10000000};
-    const uint8_t expected[] = {8, 0x20, 0x4E, 0, 0, 0x80, 0x96, 0x98, 0, 'D', 'e', 'v'};
+    tf_protocol_device_info_t info = {.name = "Dev", .vout_rate_hz = 20000, .edge_clock_hz = 10000000, .transmit_clock_hz = 20000000};
+    const uint8_t expected[] = {9, 0x20, 0x4E, 0, 0, 0x80, 0x96, 0x98, 0, 0x00, 0x2D, 0x31, 0x01, 'D', 'e', 'v'};
     CHECK(tf_protocol_encode_device_info(&info, out, sizeof(out)) == sizeof(expected));
     CHECK(memcmp(out, expected, sizeof(expected)) == 0);
     CHECK(tf_protocol_encode_device_info(&info, out, sizeof(expected) - 1) == 0);
@@ -83,11 +83,16 @@ static void encodes_config(void)
     CHECK(tf_protocol_encode_config(TF_PROTOCOL_RESULT_OK, values, out, sizeof(expected) - 1) == 0);
 }
 
-static void decodes_tone(void)
+static void decodes_waveform(void)
 {
-    const uint8_t payload[] = {0x40, 0x9C, 0x00, 0x00, 0x20, 0x00};
-    tone_burst_t tone = tf_protocol_decode_tone(payload);
-    CHECK(tone.frequency_hz == 40000 && tone.cycles == 32);
+    const uint8_t payload[] = {0x58, 0x98, 0, 0, 0x86, 0x01, 0, 0, 0x28, 0xA0, 0, 0, 0x9A, 0x01, 0, 0};
+    tuss4470_tone_t tones[2];
+    CHECK(tf_protocol_decode_waveform(payload, sizeof(payload), tones, 2) == 2);
+    CHECK(tones[0].frequency_hz == 39000 && tones[0].cycles == 390);
+    CHECK(tones[1].frequency_hz == 41000 && tones[1].cycles == 410);
+    CHECK(tf_protocol_decode_waveform(payload, sizeof(payload), tones, 1) == 0);
+    CHECK(tf_protocol_decode_waveform(payload, sizeof(payload) - 1, tones, 2) == 0);
+    CHECK(tf_protocol_decode_waveform(payload, 0, tones, 2) == 0);
 }
 
 static void print_frame(void)
@@ -141,6 +146,6 @@ int main(int argc, char **argv)
     encodes_config();
     encodes_edges_as_tick_intervals();
     starts_a_new_run_where_edges_cannot_continue();
-    decodes_tone();
+    decodes_waveform();
     return 0;
 }

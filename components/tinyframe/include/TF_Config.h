@@ -14,7 +14,7 @@
 typedef uint16_t TF_TICKS;
 typedef uint8_t TF_COUNT;
 
-#define TF_MAX_PAYLOAD_RX 64
+#define TF_MAX_PAYLOAD_RX 4096     /* holds a TRANSMIT waveform of 512 tones */
 #define TF_SENDBUF_LEN 512
 #define TF_MAX_ID_LST 2
 #define TF_MAX_TYPE_LST 3

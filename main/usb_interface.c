@@ -23,6 +23,7 @@ _Static_assert(TF_SENDBUF_LEN >= TF_PROTOCOL_LOG_MAX_LENGTH + FRAME_OVERHEAD, "L
 static const char *TAG = "USB_INTERFACE";
 
 #define EDGE_BATCH      512U
+#define MAX_TONES       (TF_MAX_PAYLOAD_RX / TF_PROTOCOL_TONE_SIZE)
 #define PAYLOAD_SIZE    TF_PROTOCOL_EDGES_SIZE(EDGE_BATCH)
 
 _Static_assert(PAYLOAD_SIZE >= TF_PROTOCOL_VOUT_SIZE(ACQUISITION_VOUT_BLOCK), "Payload must hold a VOUT block");
@@ -34,6 +35,9 @@ static TinyFrame log_framing;   /* device log events, frame IDs 0x8000-0xFFFF */
 static bool write_failed;
 static bool logs_enabled;
 static bool streaming;
+static bool transmit_pending;   /* a TRANSMIT awaits its response */
+static TF_ID transmit_id;
+static tuss4470_tone_t tones[MAX_TONES];
 static int64_t last_tick_us;
 static uint8_t payload[PAYLOAD_SIZE];
 static edge_t edges[EDGE_BATCH];
@@ -79,6 +83,8 @@ static tf_protocol_result_t transmit_result(transmit_status_t status)
         return TF_PROTOCOL_RESULT_INVALID_REQUEST;
     case TRANSMIT_TIMEOUT:
         return TF_PROTOCOL_RESULT_TIMEOUT;
+    case TRANSMIT_PENDING:
+        return TF_PROTOCOL_RESULT_BUSY;
     default:
         return TF_PROTOCOL_RESULT_DEVICE_ERROR;
     }
@@ -86,7 +92,8 @@ static tf_protocol_result_t transmit_result(transmit_status_t status)
 
 static void get_device_info(const TF_Msg *request)
 {
-    tf_protocol_device_info_t info = {.name = DEVICE_NAME, .vout_rate_hz = ACQUISITION_VOUT_RATE_HZ, .edge_clock_hz = ACQUISITION_EDGE_CLOCK_HZ};
+    tf_protocol_device_info_t info = {.name = DEVICE_NAME, .vout_rate_hz = ACQUISITION_VOUT_RATE_HZ, .edge_clock_hz = ACQUISITION_EDGE_CLOCK_HZ,
+                                      .transmit_clock_hz = TUSS4470_TRANSMIT_CLOCK_HZ};
     respond_payload(request->type, request->frame_id, tf_protocol_encode_device_info(&info, payload, sizeof(payload)));
     logs_enabled = !write_failed;
     ESP_LOGI(TAG, "Device info requested; protocol %u", TF_PROTOCOL_VERSION);
@@ -137,32 +144,44 @@ static void set_config(const TF_Msg *request)
     respond_config(request, tuss_config_write(request->data, values), values);
 }
 
-static void transmit(const TF_Msg *request)
+/* The response is sent by poll_transmit() once the transmission has ended. */
+static void start_transmit(const TF_Msg *request)
 {
-    tone_burst_t tone = tf_protocol_decode_tone(request->data);
-    respond_result(request->type, request->frame_id, transmit_result(transmit_send(&tone)));
+    if (transmit_busy()) {
+        respond_result(request->type, request->frame_id, TF_PROTOCOL_RESULT_BUSY);
+        return;
+    }
+    size_t count = tf_protocol_decode_waveform(request->data, request->len, tones, MAX_TONES);
+    transmit_status_t status = count ? transmit_start(tones, count) : TRANSMIT_INVALID;
+    if (status == TRANSMIT_PENDING) {
+        transmit_pending = true;
+        transmit_id = request->frame_id;
+    } else {
+        respond_result(request->type, request->frame_id, transmit_result(status));
+    }
 }
 
 typedef struct {
     uint8_t type;
-    size_t payload_size;
+    size_t min_size;        /* payload bytes */
+    size_t max_size;
     void (*handle)(const TF_Msg *request);
 } command_t;
 
 static const command_t commands[] = {
-    {TF_PROTOCOL_MSG_GET_DEVICE_INFO, 0, get_device_info},
-    {TF_PROTOCOL_MSG_STREAM_START, 0, start_stream},
-    {TF_PROTOCOL_MSG_STREAM_STOP, 0, stop_stream},
-    {TF_PROTOCOL_MSG_TRANSMIT, TF_PROTOCOL_TONE_SIZE, transmit},
-    {TF_PROTOCOL_MSG_GET_CONFIG, 0, get_config},
-    {TF_PROTOCOL_MSG_SET_CONFIG, TF_PROTOCOL_CONFIG_SIZE, set_config},
+    {TF_PROTOCOL_MSG_GET_DEVICE_INFO, 0, 0, get_device_info},
+    {TF_PROTOCOL_MSG_STREAM_START, 0, 0, start_stream},
+    {TF_PROTOCOL_MSG_STREAM_STOP, 0, 0, stop_stream},
+    {TF_PROTOCOL_MSG_TRANSMIT, TF_PROTOCOL_TONE_SIZE, TF_MAX_PAYLOAD_RX, start_transmit},
+    {TF_PROTOCOL_MSG_GET_CONFIG, 0, 0, get_config},
+    {TF_PROTOCOL_MSG_SET_CONFIG, TF_PROTOCOL_CONFIG_SIZE, TF_PROTOCOL_CONFIG_SIZE, set_config},
 };
 
 static TF_Result on_request(TinyFrame *tf, TF_Msg *request)
 {
     (void)tf;
     for (size_t i = 0; i < sizeof(commands) / sizeof(commands[0]); ++i) {
-        if (commands[i].type == request->type && commands[i].payload_size == request->len) {
+        if (commands[i].type == request->type && request->len >= commands[i].min_size && request->len <= commands[i].max_size) {
             commands[i].handle(request);
             return TF_STAY;
         }
@@ -170,6 +189,19 @@ static TF_Result on_request(TinyFrame *tf, TF_Msg *request)
     ESP_LOGW(TAG, "Rejected request type %u with %u payload bytes", request->type, request->len);
     respond_result(request->type, request->frame_id, TF_PROTOCOL_RESULT_INVALID_REQUEST);
     return TF_STAY;
+}
+
+/* Runs whether or not the host is connected, so a transmission always ends. */
+static void poll_transmit(void)
+{
+    if (!transmit_busy()) {
+        return;
+    }
+    transmit_status_t status = transmit_poll();
+    if (status != TRANSMIT_PENDING && transmit_pending) {
+        respond_result(TF_PROTOCOL_MSG_TRANSMIT, transmit_id, transmit_result(status));
+        transmit_pending = false;
+    }
 }
 
 static void send_event(uint8_t type, const uint8_t *data, size_t length)
@@ -245,6 +277,7 @@ static void forward_log(void)
 static void reset(void)
 {
     stop_streaming();
+    transmit_pending = false;
     logs_enabled = false;
     TF_ResetParser(&framing);
     write_failed = false;
@@ -266,6 +299,7 @@ void usb_interface_poll(void)
     int64_t now = esp_timer_get_time();
     if (!usb_transport_connected()) {
         reset();
+        poll_transmit();
         last_tick_us = now;
         return;
     }
@@ -275,6 +309,7 @@ void usb_interface_poll(void)
     for (; now - last_tick_us >= TF_TICK_US; last_tick_us += TF_TICK_US) {
         TF_Tick(&framing);
     }
+    poll_transmit();
     forward_stream();
     forward_log();
     if (write_failed) {

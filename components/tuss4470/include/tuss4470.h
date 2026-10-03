@@ -2,7 +2,7 @@
 
 /*
  * TUSS4470 ultrasonic driver/receiver IC: SPI register access, VDRV control
- * and tone bursts on IO1/IO2 (IO mode 1).
+ * and transmit waveforms on IO1/IO2 (IO mode 1).
  *
  * The chip's receive outputs (VOUT, OUT3, OUT4) are plain signals and are
  * acquired elsewhere. Supports one chip; not thread-safe.
@@ -15,10 +15,7 @@
 #include "driver/spi_master.h"
 #include "esp_err.h"
 #include "tuss4470_regs.h"
-
-#define TUSS4470_BURST_MIN_HZ      40000U
-#define TUSS4470_BURST_MAX_HZ      1000000U
-#define TUSS4470_BURST_MAX_CYCLES  255U
+#include "tuss4470_waveform.h"
 
 typedef struct {
     spi_host_device_t spi_host;     /* bus must already be initialized */
@@ -41,7 +38,10 @@ esp_err_t tuss4470_set_vdrv(bool enabled);
 esp_err_t tuss4470_wait_vdrv_ready(uint32_t timeout_ms);
 
 /*
- * Drives one tone burst, blocking until the last cycle has been sent. The
- * frequency is rounded to the nearest half-period of the 20 MHz burst clock.
+ * Starts transmitting the tones without blocking. Each frequency is rounded to
+ * the nearest half period of the 20 MHz transmit clock. tones must stay valid
+ * until tuss4470_transmit_poll() reports the end.
  */
-esp_err_t tuss4470_burst(uint32_t frequency_hz, uint16_t cycles);
+esp_err_t tuss4470_transmit_start(const tuss4470_tone_t *tones, size_t count);
+/* ESP_ERR_NOT_FINISHED while transmitting; afterwards the result, once. */
+esp_err_t tuss4470_transmit_poll(void);

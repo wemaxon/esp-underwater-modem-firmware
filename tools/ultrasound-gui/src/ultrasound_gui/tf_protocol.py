@@ -9,19 +9,21 @@ import numpy as np
 
 from ._vendor.ponyframe.TinyFrame import TF, TinyFrame
 from .tuss_config import REGISTERS, TussConfig
-from .model import DeviceInfo, EdgeBlock, VoutBlock
+from .model import DeviceInfo, EdgeBlock, Tone, VoutBlock
 
-VERSION = 8
+VERSION = 9
 (GET_DEVICE_INFO, STREAM_START, STREAM_STOP, TRANSMIT, LOG, VOUT_SAMPLES, OUT3_EDGES, STREAM_END,
  GET_CONFIG, SET_CONFIG) = range(1, 11)
 EVENTS = frozenset((LOG, VOUT_SAMPLES, OUT3_EDGES, STREAM_END))
 DEVICE_FRAME_ID = 0x8000        # set in the frame ID of every device event
-OK, INVALID_REQUEST, TIMEOUT, OVERFLOW, DEVICE_ERROR = range(5)
-RESULT_NAMES = ("OK", "Invalid request", "Operation timed out", "Data lost: device buffer overflow", "Device error")
-_INFO = Struct("<BII")
+OK, INVALID_REQUEST, TIMEOUT, OVERFLOW, DEVICE_ERROR, BUSY = range(6)
+RESULT_NAMES = ("OK", "Invalid request", "Operation timed out", "Data lost: device buffer overflow", "Device error",
+                "Device busy")
+MAX_TONES = 512                 # tones per TRANSMIT waveform
+_INFO = Struct("<BIII")
 _VOUT = Struct("<QH")
 _EDGES = Struct("<QBH")
-_TONE = Struct("<IH")
+_TONE = Struct("<II")
 _TERMINAL_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
 
 
@@ -79,8 +81,10 @@ class Decoder:
         return self.packets
 
 
-def encode_tone(tone):
-    return _TONE.pack(tone.frequency_hz, tone.cycles)
+def encode_waveform(tones: list[Tone]):
+    if not 1 <= len(tones) <= MAX_TONES:
+        raise ProtocolError(f"A waveform needs 1 to {MAX_TONES} tones")
+    return b"".join(_TONE.pack(tone.frequency_hz, tone.cycles) for tone in tones)
 
 
 def decode_result(payload):
@@ -110,12 +114,14 @@ def decode_log(payload):
 def decode_info(payload):
     if len(payload) <= _INFO.size:
         raise ProtocolError("Invalid device information")
-    version, vout_rate_hz, edge_clock_hz = _INFO.unpack_from(payload)
+    version, vout_rate_hz, edge_clock_hz, transmit_clock_hz = _INFO.unpack_from(payload)
     if version != VERSION:
         raise ProtocolError(f"Device protocol version {version}; expected {VERSION}. Update the firmware and GUI together.")
     if not vout_rate_hz or not edge_clock_hz or 1_000_000_000 % vout_rate_hz or 1_000_000_000 % edge_clock_hz:
         raise ProtocolError("Invalid device sample rates")
-    return DeviceInfo(payload[_INFO.size:].decode("utf-8"), vout_rate_hz, edge_clock_hz)
+    if transmit_clock_hz < 2 * Tone.MAX_HZ:
+        raise ProtocolError("Invalid device transmit clock")
+    return DeviceInfo(payload[_INFO.size:].decode("utf-8"), vout_rate_hz, edge_clock_hz, transmit_clock_hz)
 
 
 def decode_vout(payload, info: DeviceInfo):

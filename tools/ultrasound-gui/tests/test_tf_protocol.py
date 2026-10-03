@@ -6,10 +6,10 @@ import numpy as np
 
 from support import INFO
 from ultrasound_gui import tf_protocol
-from ultrasound_gui.model import DeviceInfo, ToneBurst
+from ultrasound_gui.model import DeviceInfo, Tone
 from ultrasound_gui.tf_protocol import (
     GET_DEVICE_INFO, LOG, OUT3_EDGES, STREAM_STOP, VERSION, VOUT_SAMPLES, Decoder, Packet, ProtocolError,
-    decode_edges, decode_info, decode_log, decode_result, decode_vout, encode, encode_tone,
+    decode_edges, decode_info, decode_log, decode_result, decode_vout, encode, encode_waveform,
 )
 
 VOUT = pack("<QHHH", 1000, 2, 1234, 3300)
@@ -38,16 +38,23 @@ class FramingTests(unittest.TestCase):
 
 
 class PayloadTests(unittest.TestCase):
-    def test_tone(self):
-        self.assertEqual(encode_tone(ToneBurst(40_000, 32)), bytes.fromhex("409c00002000"))
+    def test_waveform(self):
+        tones = [Tone(39_000, 390), Tone(41_000, 410)]
+        self.assertEqual(encode_waveform(tones), bytes.fromhex("5898000086010000" "28a000009a010000"))
+        with self.assertRaises(ProtocolError):
+            encode_waveform([])
+        with self.assertRaises(ProtocolError):
+            encode_waveform([Tone()] * 513)
 
     def test_device_info(self):
-        self.assertEqual(decode_info(pack("<BII", VERSION, 20_000, 10_000_000) + b"Dev"), DeviceInfo("Dev", 20_000, 10_000_000))
+        info = pack("<BIII", VERSION, 20_000, 10_000_000, 20_000_000) + b"Dev"
+        self.assertEqual(decode_info(info), DeviceInfo("Dev", 20_000, 10_000_000, 20_000_000))
         for payload in (
-            pack("<BII", VERSION - 1, 20_000, 10_000_000) + b"Dev",
-            pack("<BII", VERSION, 0, 10_000_000) + b"Dev",
-            pack("<BII", VERSION, 20_000, 3) + b"Dev",
-            pack("<BII", VERSION, 20_000, 10_000_000),
+            pack("<BIII", VERSION - 1, 20_000, 10_000_000, 20_000_000) + b"Dev",
+            pack("<BIII", VERSION, 0, 10_000_000, 20_000_000) + b"Dev",
+            pack("<BIII", VERSION, 20_000, 3, 20_000_000) + b"Dev",
+            pack("<BIII", VERSION, 20_000, 10_000_000, 1_000_000) + b"Dev",
+            pack("<BIII", VERSION, 20_000, 10_000_000, 20_000_000),
         ):
             with self.subTest(payload=payload.hex()), self.assertRaises(ProtocolError):
                 decode_info(payload)
@@ -73,7 +80,7 @@ class PayloadTests(unittest.TestCase):
 
     def test_result(self):
         self.assertEqual(decode_result(b"\x03"), 3)
-        for payload in (b"", b"\x00\x00", b"\x05"):
+        for payload in (b"", b"\x00\x00", b"\x06"):
             with self.subTest(payload=payload.hex()), self.assertRaises(ProtocolError):
                 decode_result(payload)
 

@@ -1,5 +1,6 @@
 #include "tuss4470.h"
 
+#include "driver/rmt_encoder.h"
 #include "driver/rmt_tx.h"
 #include "esp_check.h"
 #include "esp_log.h"
@@ -8,35 +9,50 @@
 #include "freertos/task.h"
 #include "tuss4470_frame.h"
 
-#define BURST_CLOCK_HZ          20000000U
-#define BURST_MEM_SYMBOLS       48U     /* one RMT memory block */
-#define BURST_TIMEOUT_MARGIN_MS 10U
+#define TRANSMIT_MEM_SYMBOLS        48U     /* one RMT memory block */
+#define TRANSMIT_TIMEOUT_MARGIN_US  50000
+#define SPI_ATTEMPTS                3       /* status bits can change while a response is shifted out */
 
 static const char *TAG = "TUSS4470";
 
 static struct {
     tuss4470_config_t config;
     spi_device_handle_t spi;
-    rmt_channel_handle_t burst_channel;
-    rmt_encoder_handle_t burst_encoder;
-    rmt_symbol_word_t burst_period;     /* must outlive the RMT transfer */
+    rmt_channel_handle_t transmit_channel;
+    rmt_encoder_handle_t transmit_encoder;
+    tuss4470_waveform_t waveform;       /* read by the RMT encoder while transmitting */
+    bool transmitting;
+    volatile bool transmit_done;        /* set by the RMT interrupt */
+    int64_t deadline_us;
 } tuss;
 
+/*
+ * Sends one frame. Responses carry live status bits; one that changes while the
+ * response is shifted out (VDRV_READY while VDRV is regulated) breaks its
+ * parity, so the frame is repeated.
+ */
 static esp_err_t transfer(uint16_t frame, tuss4470_response_t *response)
 {
-    spi_transaction_t transaction = {
-        .flags = SPI_TRANS_USE_TXDATA | SPI_TRANS_USE_RXDATA,
-        .length = 16,
-        .rxlength = 16,
-        .tx_data = {(uint8_t)(frame >> 8), (uint8_t)frame},
-    };
-    ESP_RETURN_ON_ERROR(spi_device_transmit(tuss.spi, &transaction), TAG, "SPI transfer failed");
-    uint16_t raw = (uint16_t)((transaction.rx_data[0] << 8) | transaction.rx_data[1]);
-    ESP_RETURN_ON_FALSE(tuss4470_frame_parse_response(raw, response), ESP_ERR_INVALID_CRC, TAG, "Response parity error: 0x%04X", raw);
-    if (response->previous_frame_error) {
-        ESP_LOGW(TAG, "Device reported a parity error in the previous frame");
+    uint16_t raw = 0;
+    for (int attempt = 0; attempt < SPI_ATTEMPTS; ++attempt) {
+        spi_transaction_t transaction = {
+            .flags = SPI_TRANS_USE_TXDATA | SPI_TRANS_USE_RXDATA,
+            .length = 16,
+            .rxlength = 16,
+            .tx_data = {(uint8_t)(frame >> 8), (uint8_t)frame},
+        };
+        ESP_RETURN_ON_ERROR(spi_device_transmit(tuss.spi, &transaction), TAG, "SPI transfer failed");
+        raw = (uint16_t)((transaction.rx_data[0] << 8) | transaction.rx_data[1]);
+        if (tuss4470_frame_parse_response(raw, response)) {
+            if (response->previous_frame_error) {
+                ESP_LOGW(TAG, "Device reported a parity error in the previous frame");
+            }
+            return ESP_OK;
+        }
+        ESP_LOGD(TAG, "Response parity error: 0x%04X", raw);
     }
-    return ESP_OK;
+    ESP_LOGE(TAG, "Response parity error in %d attempts: 0x%04X", SPI_ATTEMPTS, raw);
+    return ESP_ERR_INVALID_CRC;
 }
 
 esp_err_t tuss4470_read_register(uint8_t address, uint8_t *value)
@@ -80,15 +96,22 @@ static void log_status(const tuss4470_status_t *status)
              status->driver_pulse_fault, status->eeprom_crc_fault);
 }
 
+static esp_err_t read_status(tuss4470_status_t *status)
+{
+    tuss4470_response_t response;
+    ESP_RETURN_ON_ERROR(transfer(tuss4470_frame_read(TUSS4470_REGISTER_DEV_STAT), &response), TAG, "Failed to read status");
+    *status = tuss4470_status_from_bits(response.status_bits);
+    return ESP_OK;
+}
+
+/* Pulse faults describe the previous burst and are cleared by the next one, so only an EEPROM fault stops it. */
 esp_err_t tuss4470_wait_vdrv_ready(uint32_t timeout_ms)
 {
     const int64_t deadline_us = esp_timer_get_time() + (int64_t)timeout_ms * 1000;
     tuss4470_status_t status;
     do {
-        tuss4470_response_t response;
-        ESP_RETURN_ON_ERROR(transfer(tuss4470_frame_read(TUSS4470_REGISTER_DEV_STAT), &response), TAG, "Failed to read status");
-        status = tuss4470_status_from_bits(response.status_bits);
-        if (tuss4470_status_has_fault(&status)) {
+        ESP_RETURN_ON_ERROR(read_status(&status), TAG, "Failed to read status");
+        if (status.eeprom_crc_fault) {
             log_status(&status);
             return ESP_FAIL;
         }
@@ -104,43 +127,81 @@ esp_err_t tuss4470_wait_vdrv_ready(uint32_t timeout_ms)
 }
 
 /*
- * IO mode 1: pulling IO1 low enables the burst, the RMT clocks IO2 for the
- * requested number of cycles and IO1 going high ends it. BURST_PULSE stays at
- * its reset value 0 (continuous), so IO2 alone sets the burst length.
+ * IO mode 1: pulling IO1 low enables the burst, the RMT clocks IO2 with the
+ * waveform and IO1 going high ends it. BURST_PULSE stays at its reset value 0
+ * (continuous), so IO2 alone sets the burst length.
  */
-static esp_err_t send_cycles(uint32_t frequency_hz, uint16_t cycles)
+static size_t encode_waveform(const void *data, size_t data_size, size_t symbols_written, size_t symbols_free,
+                              rmt_symbol_word_t *symbols, bool *done, void *arg)
 {
-    uint32_t half_period = (BURST_CLOCK_HZ + frequency_hz) / (2U * frequency_hz);
-    tuss.burst_period = (rmt_symbol_word_t){
-        .level0 = 0, .duration0 = half_period,
-        .level1 = 1, .duration1 = half_period,
-    };
-    rmt_transmit_config_t transfer = {.loop_count = cycles, .flags.eot_level = 1};
-    uint32_t duration_ms = ((uint32_t)cycles * 1000U + frequency_hz - 1U) / frequency_hz;
-
-    esp_err_t error = rmt_transmit(tuss.burst_channel, tuss.burst_encoder, &tuss.burst_period, sizeof(tuss.burst_period), &transfer);
-    if (error == ESP_OK) {
-        error = rmt_tx_wait_all_done(tuss.burst_channel, (int)(duration_ms + BURST_TIMEOUT_MARGIN_MS));
-    }
-    if (error != ESP_OK) {
-        /* Abort a transfer that may still be running. */
-        ESP_RETURN_ON_ERROR(rmt_disable(tuss.burst_channel), TAG, "Failed to stop burst");
-        ESP_RETURN_ON_ERROR(rmt_enable(tuss.burst_channel), TAG, "Failed to reset burst channel");
-    }
-    return error;
+    size_t count = tuss4470_waveform_fill(&tuss.waveform, (uint32_t *)symbols, symbols_free);
+    *done = tuss4470_waveform_done(&tuss.waveform);
+    return count;
 }
 
-esp_err_t tuss4470_burst(uint32_t frequency_hz, uint16_t cycles)
+/*
+ * Ends the burst right after the last cycle: if IO1 stayed low while IO2 rests
+ * for more than 64 us, the chip would report a driver pulse fault.
+ */
+static bool on_transmit_done(rmt_channel_handle_t channel, const rmt_tx_done_event_data_t *event, void *context)
 {
-    ESP_RETURN_ON_FALSE(frequency_hz >= TUSS4470_BURST_MIN_HZ && frequency_hz <= TUSS4470_BURST_MAX_HZ, ESP_ERR_INVALID_ARG, TAG, "Frequency out of range");
-    ESP_RETURN_ON_FALSE(cycles && cycles <= TUSS4470_BURST_MAX_CYCLES, ESP_ERR_INVALID_ARG, TAG, "Cycle count out of range");
+    gpio_set_level(tuss.config.io1_gpio, 1);
+    tuss.transmit_done = true;
+    return false;
+}
+
+esp_err_t tuss4470_transmit_start(const tuss4470_tone_t *tones, size_t count)
+{
+    ESP_RETURN_ON_FALSE(tones && count, ESP_ERR_INVALID_ARG, TAG, "No tones");
+    ESP_RETURN_ON_FALSE(!tuss.transmitting, ESP_ERR_INVALID_STATE, TAG, "Already transmitting");
+    for (size_t i = 0; i < count; ++i) {
+        ESP_RETURN_ON_FALSE(tones[i].frequency_hz >= TUSS4470_TONE_MIN_HZ && tones[i].frequency_hz <= TUSS4470_TONE_MAX_HZ && tones[i].cycles,
+                            ESP_ERR_INVALID_ARG, TAG, "Invalid tone %u", (unsigned)i);
+    }
+    tuss4470_waveform_start(&tuss.waveform, tones, count, TUSS4470_TRANSMIT_CLOCK_HZ);
+    uint64_t duration_us = tuss4470_waveform_duration_us(tones, count, TUSS4470_TRANSMIT_CLOCK_HZ);
+    tuss.deadline_us = esp_timer_get_time() + (int64_t)duration_us + TRANSMIT_TIMEOUT_MARGIN_US;
+
+    tuss.transmit_done = false;
     ESP_RETURN_ON_ERROR(gpio_set_level(tuss.config.io1_gpio, 0), TAG, "Failed to enable burst");
-    esp_err_t error = send_cycles(frequency_hz, cycles);
-    esp_err_t released = gpio_set_level(tuss.config.io1_gpio, 1);
-    return error != ESP_OK ? error : released;
+    rmt_transmit_config_t transfer = {.flags.eot_level = 1};
+    esp_err_t error = rmt_transmit(tuss.transmit_channel, tuss.transmit_encoder, tones, count * sizeof(*tones), &transfer);
+    if (error != ESP_OK) {
+        gpio_set_level(tuss.config.io1_gpio, 1);
+        return error;
+    }
+    tuss.transmitting = true;
+    return ESP_OK;
 }
 
-static esp_err_t init_burst(void)
+esp_err_t tuss4470_transmit_poll(void)
+{
+    if (!tuss.transmitting) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (tuss.transmit_done) {
+        tuss.transmitting = false;
+        tuss4470_status_t status;
+        ESP_RETURN_ON_ERROR(read_status(&status), TAG, "Failed to read status after the burst");
+        if (status.driver_pulse_fault) {
+            log_status(&status);
+            ESP_LOGE(TAG, "The burst was ended early by a driver pulse fault");
+            return ESP_FAIL;
+        }
+        return ESP_OK;
+    }
+    if (esp_timer_get_time() < tuss.deadline_us) {
+        return ESP_ERR_NOT_FINISHED;
+    }
+    /* Abort a transfer that did not finish in time. */
+    rmt_disable(tuss.transmit_channel);
+    rmt_enable(tuss.transmit_channel);
+    gpio_set_level(tuss.config.io1_gpio, 1);
+    tuss.transmitting = false;
+    return ESP_ERR_TIMEOUT;
+}
+
+static esp_err_t init_transmit(void)
 {
     gpio_config_t io1 = {
         .pin_bit_mask = 1ULL << tuss.config.io1_gpio,
@@ -152,15 +213,17 @@ static esp_err_t init_burst(void)
     rmt_tx_channel_config_t channel = {
         .gpio_num = tuss.config.io2_gpio,
         .clk_src = RMT_CLK_SRC_DEFAULT,
-        .resolution_hz = BURST_CLOCK_HZ,
-        .mem_block_symbols = BURST_MEM_SYMBOLS,
+        .resolution_hz = TUSS4470_TRANSMIT_CLOCK_HZ,
+        .mem_block_symbols = TRANSMIT_MEM_SYMBOLS,
         .trans_queue_depth = 1,
         .flags.init_level = 1,      /* TI recommends IO2 high before the burst */
     };
-    rmt_copy_encoder_config_t encoder = {};
-    ESP_RETURN_ON_ERROR(rmt_new_tx_channel(&channel, &tuss.burst_channel), TAG, "Failed to create RMT TX channel");
-    ESP_RETURN_ON_ERROR(rmt_new_copy_encoder(&encoder, &tuss.burst_encoder), TAG, "Failed to create RMT encoder");
-    return rmt_enable(tuss.burst_channel);
+    rmt_simple_encoder_config_t encoder = {.callback = encode_waveform, .min_chunk_size = 1};
+    rmt_tx_event_callbacks_t callbacks = {.on_trans_done = on_transmit_done};
+    ESP_RETURN_ON_ERROR(rmt_new_tx_channel(&channel, &tuss.transmit_channel), TAG, "Failed to create RMT TX channel");
+    ESP_RETURN_ON_ERROR(rmt_new_simple_encoder(&encoder, &tuss.transmit_encoder), TAG, "Failed to create RMT encoder");
+    ESP_RETURN_ON_ERROR(rmt_tx_register_event_callbacks(tuss.transmit_channel, &callbacks, NULL), TAG, "Failed to register RMT callback");
+    return rmt_enable(tuss.transmit_channel);
 }
 
 esp_err_t tuss4470_init(const tuss4470_config_t *config)
@@ -183,7 +246,7 @@ esp_err_t tuss4470_init(const tuss4470_config_t *config)
     ESP_LOGI(TAG, "DEVICE_ID=0x%02X REV_ID=0x%02X", device_id, revision);
 
     ESP_RETURN_ON_ERROR(tuss4470_update_register(TUSS4470_REGISTER_DEV_CTRL_3, TUSS4470_DEV3_IO_MODE_MASK, 1), TAG, "Failed to select IO mode 1");
-    ESP_RETURN_ON_ERROR(init_burst(), TAG, "Failed to initialize burst output");
+    ESP_RETURN_ON_ERROR(init_transmit(), TAG, "Failed to initialize transmit output");
     ESP_LOGI(TAG, "Initialized: IO1 GPIO %d, IO2 GPIO %d", config->io1_gpio, config->io2_gpio);
     return ESP_OK;
 }
