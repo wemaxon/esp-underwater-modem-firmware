@@ -1,6 +1,8 @@
+import tempfile
 import time
 import tkinter as tk
 import unittest
+from pathlib import Path
 
 from support import wait_until
 from ultrasound_gui.session import AcquisitionState, ConnectionState
@@ -9,14 +11,24 @@ from ultrasound_gui.transport import DevicePort, open_device
 
 class ApplicationTests(unittest.TestCase):
     def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.link_file = Path(self.directory.name) / "link.json"
+        self.app = self.open_app()
+
+    def open_app(self):
         try:
             from ultrasound_gui.ui.app import Application
-            self.app = Application(discover=lambda: [DevicePort("Demo", None)], device_factory=open_device)
+            app = Application(discover=lambda: [DevicePort("Demo", None)], device_factory=open_device, link_file=self.link_file)
         except tk.TclError as exc:
             self.skipTest(f"Tk unavailable: {exc}")
-        self.app.withdraw()
+        app.withdraw()
+        return app
 
     def tearDown(self):
+        self.close_app()
+        self.directory.cleanup()
+
+    def close_app(self):
         self.app.close()        # disconnects, then destroys the window
         try:
             wait_until(lambda: self.pump() or not self.app.winfo_exists())
@@ -54,13 +66,24 @@ class ApplicationTests(unittest.TestCase):
     def test_sent_frame_is_decoded(self):
         self.app.connect()
         wait_until(lambda: self.pump() or self.app.status.connection == ConnectionState.CONNECTED)
-        self.app.modem.fields["symbol_ms"][1].set("2")
-        self.app.modem.message.set("Hi there")
+        self.app.link.variables["symbol_ms"].set("2")
+        self.app.link.variables["rate"].set("3/4")
+        self.app.link.message.set("Hi there")
         self.app.run_acquisition()
         wait_until(lambda: self.pump() or self.app.status.acquisition == AcquisitionState.STREAMING)
         self.app.send_frame()
-        wait_until(lambda: self.pump() or "Hi there" in self.app.modem.frames.get("1.0", "end"), timeout=5)
-        self.assertIn("OK", self.app.modem.frames.get("1.0", "end"))
+        wait_until(lambda: self.pump() or self.app.received.rows(), timeout=5)
+        _, crc, _, _, size, payload = self.app.received.rows()[0]
+        self.assertEqual((crc, size, payload), ("OK", "8", "Hi there"))
+        self.assertEqual(self.app.outputs.tab(self.app.received, "text"), "Received frames (1)")
+
+    def test_link_settings_are_kept_between_runs(self):
+        self.app.link.variables["center_hz"].set("45000")
+        self.app.link.variables["interleaver"].set("Off")
+        expected = self.app.link.settings()
+        self.close_app()
+        self.app = self.open_app()
+        self.assertEqual(self.app.link.settings(), expected)
 
     def test_single_shot_holds_the_triggered_window(self):
         self.app.connect()

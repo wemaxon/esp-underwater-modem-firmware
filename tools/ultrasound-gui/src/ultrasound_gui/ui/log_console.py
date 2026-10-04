@@ -2,11 +2,11 @@ from tkinter import ttk
 from tkinter.scrolledtext import ScrolledText
 
 
-class LogConsole(ttk.LabelFrame):
+class LogConsole(ttk.Frame):
     MAX_CHARS = 65_536
 
     def __init__(self, parent):
-        super().__init__(parent, text="Device logs", padding=4)
+        super().__init__(parent, padding=4)
         self.rowconfigure(0, weight=1)
         self.columnconfigure(0, weight=1)
         self.text = ScrolledText(self, height=7, wrap="word", state="disabled", font="TkFixedFont", undo=False)

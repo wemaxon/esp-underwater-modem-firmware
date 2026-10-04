@@ -59,29 +59,50 @@ python -m unittest discover -s tools/ultrasound-gui/tests -t tools/ultrasound-gu
 The GUI's interoperability test decodes frames produced by the C host test
 build in `build/host` and is skipped when that build is missing.
 
-The GUI acquires like an oscilloscope. **Roll** shows the newest window of the
+The GUI's sidebar has one tab per scope: **Scope** (acquisition, trigger and a
+test tone), **Device** (TUSS4470 configuration, applied to the board) and
+**Link** (the settings both ends must share, and sending). Below the plot,
+**Device log** and **Received frames** show what the board and the decoder report.
+
+The scope acquires like an oscilloscope. **Roll** shows the newest window of the
 stream continuously. **Single** waits until VOUT rises through the trigger
 level (with 50 mV hysteresis), or until *Force trigger* is pressed, then holds
 the window around the trigger, including the pre-trigger time, and stops the
 stream. Times in a held capture are relative to the trigger.
 
-The **Modem** tab sends a message as one BFSK frame and decodes frames from the
-stream. Use one GUI instance per board: one sends, the other streams and
-decodes. A 1 is sent at centre + shift, a 0 at centre - shift; the receiver
-measures the OUT3 frequency between zero crossings. The frame, also the basis
-for later modulations (`tools/ultrasound-gui/src/ultrasound_gui/modem`), is:
+The **Link** tab sends a message as one BFSK frame; frames decoded from the
+stream appear under **Received frames**. Use one GUI instance per board: one
+sends, the other streams and decodes. Link settings are not sent over the air,
+so both GUIs need the same ones: *Save* them to a file and *Load* it in the
+other. Each GUI also keeps its last link settings in
+`~/.underwater-modem-toolbox/link.json`.
+
+A 1 is sent at centre + shift, a 0 at centre - shift; the tones must be at
+least one symbol rate apart (shift × symbol length ≥ 500 Hz·ms). The receiver
+correlates the OUT3 square wave with both tones over each symbol (a
+noncoherent matched filter, integrated exactly between the edges) and searches
+a small bank of frequency offsets against Doppler shift. The frame, also the
+basis for later modulations (`tools/ultrasound-gui/src/ultrasound_gui/modem`), is:
 
 | Field | Bits |
 |---|---:|
 | Preamble, alternating 1 0 | adjustable, even |
 | Sync word `0x2DD4` | 16 |
-| Payload length in bytes, up to the adjustable maximum | 8 |
-| Payload | 8 × length |
-| CRC-16/CCITT-FALSE over length and payload | 16 |
+| Header: payload length in bytes, up to the adjustable maximum | 8, coded |
+| Body: payload and CRC-16/CCITT-FALSE over length and payload | 8 × length + 16, coded |
+
+Header and body are coded separately with the K=7 convolutional code
+(generators 171, 133 octal, terminated with six zero bits) and decoded with
+soft-decision Viterbi. The code rate is adjustable: 1/2, punctured to 2/3 or 3/4
+(patterns 11 01 and 11 01 10 per data bit), or off. Higher rates send faster but
+correct fewer errors: about 4 %, 2 % and 1 % wrong channel bits respectively.
+The interleaver writes the code into rows of the adjustable depth and sends it
+by columns, which spreads bursts of errors.
 
 Longer symbols carry over longer distances at a lower bit rate. Decoded frames
-show their CRC status and sync quality. The simulator ("Demo") receives what it
-transmits, so the modem can be tried without hardware.
+show their CRC status, sync quality *q* (near 1 for a clean signal, about 0.15
+at the sensitivity limit) and the measured frequency offset. The simulator
+("Demo") receives what it transmits, so the modem can be tried without hardware.
 
 ## USB interface protocol
 
@@ -139,7 +160,7 @@ The firmware keeps the bits it relies on, whatever SET requests: reserved
 bits, `VOUT_SCALE_SEL` (VOUT maps to 3.3 V), `ZC_CMP_EN` (OUT3 is captured),
 `VDRV_HI_Z` and `DIS_VDRV_REG_LSTN` (VDRV is switched on only for bursts),
 `PRE_DRIVER_MODE` and the `BURST_PULSE` count (bursts are timed on IO2). Field
-meanings are those of the datasheet; the GUI's Configuration tab edits them by
+meanings are those of the datasheet; the GUI's Device tab edits them by
 name. The VDRV voltage must stay below VPWR - 0.1 V, or VDRV never becomes
 ready and TRANSMIT times out.
 

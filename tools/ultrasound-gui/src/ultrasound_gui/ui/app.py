@@ -4,28 +4,32 @@ import tkinter as tk
 from tkinter import ttk
 
 from ..model import StreamHistory
-from ..modem import bfsk, framing
+from ..modem import bfsk
 from ..tf_protocol import MAX_TONES
 from ..trigger import LevelTrigger, SingleShot
 from ..transport import discover_devices, open_device
 from ..session import AcquisitionState, ConnectionState, Session, SessionStatus
 from .controls import AcquisitionControls, ConfigurationControls, ConnectionBar, TransmitControls
-from .modem_controls import ModemControls
-from .plot import ScopePlot
+from .link_controls import LinkControls
 from .log_console import LogConsole
+from .plot import ScopePlot
+from .received_frames import ReceivedFrames
+from .scrollable import ScrollableFrame
 
 
 class Application(tk.Tk):
     REFRESH_MS = 33
     DECODE_INTERVAL_S = 0.25
 
-    def __init__(self, discover=discover_devices, device_factory=open_device):
+    def __init__(self, discover=discover_devices, device_factory=open_device, link_file=None):
+        """link_file keeps the link settings between runs; None starts with the defaults."""
         super().__init__()
         self.title("Underwater Modem Toolbox")
         self.geometry("1250x780")
         self.minsize(950, 620)
         self.discover = discover
         self.device_factory = device_factory
+        self.link_file = link_file
         self.session = None
         self.status = SessionStatus()
         self.closing = False
@@ -49,19 +53,22 @@ class Application(tk.Tk):
         self.plot.grid(row=0, column=0, sticky="nsew")
         sidebar = ttk.Notebook(body)
         sidebar.grid(row=0, column=1, sticky="ns", padx=(6, 10), pady=(0, 8))
-        measure = ttk.Frame(sidebar, padding=(0, 8, 0, 0))
-        measure.columnconfigure(0, weight=1)
-        sidebar.add(measure, text="Measure")
-        self.acquisition = AcquisitionControls(measure, self.run_acquisition, self.stop_acquisition, self.force_trigger, self.update_view)
+        scope, device, link = (self.sidebar_tab(sidebar, title) for title in ("Scope", "Device", "Link"))
+        self.acquisition = AcquisitionControls(scope, self.run_acquisition, self.stop_acquisition, self.force_trigger, self.update_view)
         self.acquisition.grid(row=0, column=0, sticky="ew")
-        self.transmission = TransmitControls(measure, self.transmit)
+        self.transmission = TransmitControls(scope, self.transmit)
         self.transmission.grid(row=1, column=0, sticky="ew", pady=(12, 0))
-        self.configuration = ConfigurationControls(sidebar, self.apply_configuration)
-        sidebar.add(self.configuration, text="Configuration", padding=(0, 8, 0, 0))
-        self.modem = ModemControls(sidebar, self.send_frame, self.update_history_span)
-        sidebar.add(self.modem, text="Modem", padding=(0, 8, 0, 0))
-        self.console = LogConsole(panes)
-        panes.add(self.console, weight=1)
+        self.configuration = ConfigurationControls(device, self.apply_configuration)
+        self.configuration.grid(row=0, column=0, sticky="ew")
+        self.link = LinkControls(link, self.send_frame, self.update_history_span)
+        self.link.grid(row=0, column=0, sticky="ew")
+        self.outputs = ttk.Notebook(panes)
+        panes.add(self.outputs, weight=1)
+        self.console = LogConsole(self.outputs)
+        self.outputs.add(self.console, text="Device log")
+        self.received = ReceivedFrames(self.outputs, self.show_frame_count)
+        self.outputs.add(self.received, text="Received frames")
+        self.load_link_file()
         self.footer = ttk.Label(self, textvariable=self.message, padding=(10, 6), anchor="w")
         self.footer.grid(row=2, column=0, sticky="ew")
         self.bind("<Configure>", self.resize_footer)
@@ -69,6 +76,13 @@ class Application(tk.Tk):
         self.refresh_devices()
         self.protocol("WM_DELETE_WINDOW", self.close)
         self.after(self.REFRESH_MS, self.poll)
+
+    @staticmethod
+    def sidebar_tab(sidebar, title):
+        """A tab whose content scrolls when the window is too low for it."""
+        tab = ScrollableFrame(sidebar, padding=(0, 8, 6, 0))
+        sidebar.add(tab, text=title)
+        return tab.content
 
     def resize_footer(self, event):
         if event.widget is self:
@@ -91,7 +105,7 @@ class Application(tk.Tk):
         self.acquisition.set_status(status, self.single_state(), armed=self.single is not None and not self.single.triggered)
         self.configuration.set_status(status)
         self.transmission.set_status(status)
-        self.modem.set_status(status)
+        self.link.set_status(status)
         self.message.set(status.error or status.device_name)
         self.footer.configure(foreground="#b33b35" if status.error else "")
 
@@ -184,42 +198,60 @@ class Application(tk.Tk):
     def update_history_span(self):
         """Keeps enough of the stream for the plot window and the longest frame being decoded."""
         try:
-            settings = self.modem.settings()
+            link = self.link.settings()
         except ValueError:
             return
-        frame_s = settings.frame_duration_s(settings.max_payload)
+        frame_s = link.frame_duration_s(link.framing.max_payload)
         self.history.set_span(max(AcquisitionControls.MAX_WINDOW_MS / 1000, 2 * frame_s + 1))
+
+    def load_link_file(self):
+        if self.link_file is None or not self.link_file.exists():
+            return
+        try:
+            self.link.load_file(self.link_file)
+        except (OSError, ValueError) as exc:
+            self.message.set(f"Could not load the last link settings: {exc}")
+
+    def save_link_file(self):
+        if self.link_file is None:
+            return
+        try:
+            self.link.save_file(self.link_file)
+        except (OSError, ValueError):
+            pass                # invalid entries are not kept
+
+    def show_frame_count(self, count):
+        self.outputs.tab(self.received, text=f"Received frames ({count})" if count else "Received frames")
 
     def send_frame(self):
         if self.closing or self.session is None or self.session.info is None or self.status.transmitting:
             return
         try:
-            settings = self.modem.settings()
-            payload = self.modem.payload()
-            if len(payload) > settings.max_payload:
-                raise ValueError(f"The message exceeds the maximum payload of {settings.max_payload} bytes")
-            bits = framing.frame_bits(payload, settings.preamble_bits)
-            tones = bfsk.modulate(bits, settings, self.session.info.transmit_clock_hz)
+            link = self.link.settings()
+            tones = bfsk.modulate(link.frame_bits(self.link.payload()), link.modulation, self.session.info.transmit_clock_hz)
             if len(tones) > MAX_TONES:
                 raise ValueError(f"The frame needs {len(tones)} tones; one transmission holds {MAX_TONES}")
         except ValueError as exc:
-            self.modem.show_error(str(exc))
+            self.link.show_error(str(exc))
             return
         self.render_status(replace(self.status, transmitting=True, transmit_message="Transmitting"))
         self.session.transmit(tones)
 
     def decode_stream(self):
         """Searches the stream for new frames, at most every DECODE_INTERVAL_S."""
-        if not self.modem.decoding.get() or monotonic() < self.next_decode or self.history.earliest_ns is None:
+        if not self.received.decoding.get() or monotonic() < self.next_decode or self.history.earliest_ns is None:
+            return
+        if self.session is None or self.session.info is None:
             return
         self.next_decode = monotonic() + self.DECODE_INTERVAL_S
         try:
-            settings = self.modem.settings()
+            link = self.link.settings()
         except ValueError:
             return
         start_ns = max(self.decode_from_ns, self.history.earliest_ns)
-        frames, self.decode_from_ns = bfsk.decode(self.history, settings, start_ns, self.history.latest_ns)
-        self.modem.add_frames(frames)
+        frames, self.decode_from_ns = bfsk.decode(self.history, link, self.session.info.transmit_clock_hz,
+                                                  start_ns, self.history.latest_ns)
+        self.received.add_frames(frames)
 
     def apply_configuration(self):
         if self.session is not None and self.configuration.device_config is not None:
@@ -265,5 +297,7 @@ class Application(tk.Tk):
         self.after(self.REFRESH_MS, self.poll)
 
     def close(self):
+        if not self.closing:
+            self.save_link_file()
         self.closing = True
         self.disconnect()
